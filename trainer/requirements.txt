@@ -1,7 +1,5 @@
-brainflow
 numpy
-scipy
+pandas
 scikit-learn
 mne
-pandas
 joblib

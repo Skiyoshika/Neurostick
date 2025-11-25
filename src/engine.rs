@@ -8,42 +8,104 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// 🧠 意图特征解码器
+/// 这里模拟了 AI 模型的推断过程：从复杂的 16 通道信号中识别特定的“模式”
+fn decode_neural_intent(
+    data: &[f64], 
+    threshold: f64, 
+    calib_mode: bool,
+    calib_max: &mut f64,
+    start_time: Instant,
+    tx: &Sender<BciMessage>
+) -> GamepadState {
+    let mut gp = GamepadState::default();
+    
+    // 辅助函数：检查特征组合是否满足
+    // 只有当 indices 中列出的所有通道的信号强度都超过阈值时，才返回 true
+    let check_pattern = |indices: &[usize]| -> bool {
+        indices.iter().all(|&idx| data[idx].abs() > threshold)
+    };
+
+    // =========================================================================
+    // 1. 脑波特征映射表 (Brainwave Feature Mapping)
+    // 这里定义了每个“动作意图”对应的“脑区协同模式”
+    // =========================================================================
+
+    // --- 左摇杆 (移动意图) ---
+    // 模拟运动皮层 (C3/C4) 的协同模式
+    if check_pattern(&[0, 4]) { gp.ly += 1.0; } // W (前进): 激活 Ch0 + Ch4
+    if check_pattern(&[1, 5]) { gp.ly -= 1.0; } // S (后退): 激活 Ch1 + Ch5
+    if check_pattern(&[2, 6]) { gp.lx -= 1.0; } // A (向左): 激活 Ch2 + Ch6
+    if check_pattern(&[3, 7]) { gp.lx += 1.0; } // D (向右): 激活 Ch3 + Ch7
+
+    // --- 右摇杆 (视角/注意力意图) ---
+    // 模拟枕叶 (O1/O2) 视觉区的协同
+    if check_pattern(&[8, 12])  { gp.ry += 1.0; } // I (看上): Ch8 + Ch12
+    if check_pattern(&[9, 13])  { gp.ry -= 1.0; } // K (看下): Ch9 + Ch13
+    if check_pattern(&[10, 14]) { gp.rx -= 1.0; } // J (看左): Ch10 + Ch14
+    if check_pattern(&[11, 15]) { gp.rx += 1.0; } // L (看右): Ch11 + Ch15
+
+    // --- 动作键 ABXY (高频爆发指令) ---
+    // 模拟更复杂的跨脑区协同，需要3个通道同时激活
+    if check_pattern(&[0, 1, 2]) { gp.a = true; } // Space (跳跃/确认): 额叶强激活
+    if check_pattern(&[2, 3, 4]) { gp.b = true; } // Z (B键)
+    if check_pattern(&[4, 5, 6]) { gp.x = true; } // X (攻击/物品)
+    if check_pattern(&[6, 7, 0]) { gp.y = true; } // C (Y键)
+
+    // --- 肩键/扳机 (特殊功能) ---
+    // 模拟特定频率的信号组合
+    if check_pattern(&[8, 9, 10])    { gp.lb = true; } // U (LB): 防御
+    if check_pattern(&[10, 11, 12])  { gp.rb = true; } // O (RB): 轻攻击
+    if check_pattern(&[12, 13, 14])  { gp.lt = true; } // Q (LT): 战技
+    if check_pattern(&[13, 14, 15])  { gp.rt = true; } // E (RT): 重攻击
+
+    // --- D-Pad (辅助指令) ---
+    // 模拟跨半球的长距离连接 (Cross-Hemisphere Sync)
+    if check_pattern(&[0, 15]) { gp.dpad_up = true; }    // Up: 首尾呼应
+    if check_pattern(&[3, 12]) { gp.dpad_down = true; }  // Down
+    if check_pattern(&[4, 11]) { gp.dpad_left = true; }  // Left
+    if check_pattern(&[7, 8])  { gp.dpad_right = true; } // Right
+
+    // 2. 校准逻辑
+    if calib_mode {
+        let max_s = data.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+        if max_s > *calib_max { *calib_max = max_s; }
+        if start_time.elapsed().as_secs() >= 3 {
+            tx.send(BciMessage::CalibrationResult((), *calib_max)).ok();
+        }
+    }
+
+    gp
+}
+
 pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
     thread::spawn(move || {
-        // 发送启动日志
-        tx.send(BciMessage::Log("⚙️ Core Engine v7.3 Ready.".to_owned())).ok();
+        tx.send(BciMessage::Log("⚙️ Core Engine v9.0 (Neural Pattern).".to_owned())).ok();
         
-        // 1. 初始化 vJoy
         let mut joystick = match VJoyClient::new(1) {
             Ok(j) => { tx.send(BciMessage::VJoyStatus(true)).ok(); Some(j) },
             Err(_) => { tx.send(BciMessage::VJoyStatus(false)).ok(); None }
         };
 
-        // 2. 初始化数据录制器
         let mut recorder = DataRecorder::new();
-
-        // 3. 加载 DLL
+        // 即使没有DLL也能运行模拟模式
         let lib_opt = unsafe { Library::new("BoardController.dll").ok() };
         
-        // 内部状态
         let mut current_mode = ConnectionMode::Simulation;
         let mut is_active = false;
         let mut is_streaming = false;
         let mut threshold = 200.0;
         
-        // 模拟状态
         let mut sim_phase = 0.0;
         let mut current_sim_input = SimInputIntent::default();
         
-        // 校准状态
         let mut calib_mode = false;
         let mut calib_max_val = 0.0;
-        let mut calib_start = Instant::now();
+        let mut calib_start_time = Instant::now();
+        let mut inject_artifact_frames = 0; 
 
         loop {
-            // ============================================================
-            // 1. 消息处理 (处理 GUI 发来的命令)
-            // ============================================================
+            // 1. 消息处理 (保持高效，每帧最多处理10条)
             for _ in 0..10 { 
                 if let Ok(cmd) = rx_cmd.try_recv() {
                     match cmd {
@@ -55,19 +117,16 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                                     tx.send(BciMessage::Status(true)).ok();
                                     tx.send(BciMessage::Log("✅ Sim Connected".to_owned())).ok();
                                 } else if let Some(lib) = &lib_opt {
-                                    // 硬件连接逻辑
                                     unsafe {
                                         let prepare: Symbol<unsafe extern "C" fn(i32, *const i8) -> i32> = lib.get(b"prepare_session").unwrap();
                                         let p_str = r#"{"serial_port":"COM4","timeout":3,"master_board":-100,"file":"","file_anc":"","file_aux":"","ip_address":"","ip_address_anc":"","ip_address_aux":"","ip_port":0,"ip_port_anc":0,"ip_port_aux":0,"ip_protocol":0,"mac_address":"","other_info":"","serial_number":""}"#;
-                                        let p_cstr = CString::new(p_str).unwrap();
-                                        
-                                        // 尝试连接 ID 2 (Cyton+Daisy)
-                                        if prepare(2, p_cstr.as_ptr()) == 0 {
+                                        let params = CString::new(p_str).unwrap();
+                                        if prepare(2, params.as_ptr()) == 0 {
                                             is_active = true;
                                             tx.send(BciMessage::Status(true)).ok();
                                             tx.send(BciMessage::Log("✅ Hardware Connected".to_owned())).ok();
                                         } else {
-                                            tx.send(BciMessage::Log("❌ Connect Failed (Check Power/USB)".to_owned())).ok();
+                                            tx.send(BciMessage::Log("❌ Connect Failed".to_owned())).ok();
                                         }
                                     }
                                 }
@@ -77,111 +136,107 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                             is_active = false; is_streaming = false; 
                             if recorder.is_recording() { recorder.stop(); tx.send(BciMessage::RecordingStatus(false)).ok(); }
                             tx.send(BciMessage::Status(false)).ok(); 
-                            // (可选：调用 release_session)
                         },
                         GuiCommand::StartStream => { 
                             if is_active { 
                                 is_streaming = true; 
                                 if current_mode == ConnectionMode::Hardware {
-                                    if let Some(lib) = &lib_opt {
-                                        unsafe {
-                                            let start: Symbol<unsafe extern "C" fn(i32, *const i8) -> i32> = lib.get(b"start_stream").unwrap();
-                                            let empty = CString::new("").unwrap();
-                                            start(45000, empty.as_ptr());
-                                        }
-                                    }
+                                    if let Some(lib) = &lib_opt { unsafe { let start: Symbol<unsafe extern "C" fn(i32, *const i8) -> i32> = lib.get(b"start_stream").unwrap(); let e = CString::new("").unwrap(); start(45000, e.as_ptr()); } }
                                 }
-                                tx.send(BciMessage::Log("🌊 Stream Started".to_owned())).ok(); 
+                                tx.send(BciMessage::Log("🌊 Stream Started".to_owned())).ok();
                             } 
                         },
                         GuiCommand::StopStream => { 
                             is_streaming = false; 
                             if current_mode == ConnectionMode::Hardware {
-                                if let Some(lib) = &lib_opt {
-                                    unsafe {
-                                        let stop: Symbol<unsafe extern "C" fn(i32) -> i32> = lib.get(b"stop_stream").unwrap();
-                                        stop(2);
-                                    }
-                                }
+                                if let Some(lib) = &lib_opt { unsafe { let stop: Symbol<unsafe extern "C" fn(i32) -> i32> = lib.get(b"stop_stream").unwrap(); stop(2); } }
                             }
-                            tx.send(BciMessage::Log("🛑 Stream Stopped".to_owned())).ok(); 
+                            tx.send(BciMessage::Log("🛑 Stream Stopped".to_owned())).ok();
                         },
                         GuiCommand::SetThreshold(v) => threshold = v,
-                        GuiCommand::StartCalibration(_) => { calib_mode = true; calib_max_val = 0.0; calib_start = Instant::now(); },
+                        GuiCommand::StartCalibration(_) => { calib_mode = true; calib_max_val = 0.0; calib_start_time = Instant::now(); },
                         GuiCommand::UpdateSimInput(input) => current_sim_input = input,
                         GuiCommand::StartRecording(label) => { recorder.start(&label); tx.send(BciMessage::RecordingStatus(true)).ok(); },
-                        GuiCommand::StopRecording => { recorder.stop(); tx.send(BciMessage::RecordingStatus(false)).ok(); }
+                        GuiCommand::StopRecording => { recorder.stop(); tx.send(BciMessage::RecordingStatus(false)).ok(); },
+                        GuiCommand::InjectArtifact => { inject_artifact_frames = 20; tx.send(BciMessage::Log("💉 Injecting...".to_owned())).ok(); }
                     }
                 } else {
                     break; 
                 }
             }
 
-            // ============================================================
-            // 2. 数据流循环
-            // ============================================================
+            // 2. 数据循环
             if is_streaming {
+                // 严格限制为 16 通道 (对应 Cyton+Daisy)
                 let mut channel_data = vec![0.0f64; 16];
 
-                // --- 分支 A: 模拟模式 ---
+                // === 模拟信号生成：将按键意图转化为特定的脑波组合 ===
                 if current_mode == ConnectionMode::Simulation {
                     sim_phase += 0.1;
-                    for i in 0..16 { channel_data[i] = (sim_phase * (i as f64 * 0.1 + 1.0)).sin() * 2.0; }
+                    // 基础底噪 (Alpha波模拟)
+                    for i in 0..16 { channel_data[i] = (sim_phase * (i as f64 * 0.1 + 1.0)).sin() * 5.0; }
                     
-                    let amp = 1000.0;
-                    if current_sim_input.w { channel_data[0] += amp; }
-                    if current_sim_input.s { channel_data[1] += amp; }
-                    if current_sim_input.a { channel_data[2] += amp; }
-                    if current_sim_input.d { channel_data[3] += amp; }
-                    if current_sim_input.space { channel_data[4] += amp; } 
-                    if current_sim_input.key_z { channel_data[5] += amp; } 
-                    if current_sim_input.key_x { channel_data[6] += amp; } 
-                    if current_sim_input.key_c { channel_data[7] += amp; } 
-                    if current_sim_input.up    { channel_data[8] += amp; } 
-                    if current_sim_input.down  { channel_data[9] += amp; } 
-                    if current_sim_input.left  { channel_data[10] += amp; } 
-                    if current_sim_input.right { channel_data[11] += amp; } 
+                    let amp = 1000.0; // 强激活信号
                     
+                    // 模拟：按下 W -> 激活 Ch0 和 Ch4
+                    if current_sim_input.w { channel_data[0] += amp; channel_data[4] += amp; }
+                    if current_sim_input.s { channel_data[1] += amp; channel_data[5] += amp; }
+                    if current_sim_input.a { channel_data[2] += amp; channel_data[6] += amp; }
+                    if current_sim_input.d { channel_data[3] += amp; channel_data[7] += amp; }
+
+                    // 模拟：右摇杆 -> 激活后部通道
+                    if current_sim_input.up    { channel_data[8] += amp; channel_data[12] += amp; }
+                    if current_sim_input.down  { channel_data[9] += amp; channel_data[13] += amp; }
+                    if current_sim_input.left  { channel_data[10] += amp; channel_data[14] += amp; }
+                    if current_sim_input.right { channel_data[11] += amp; channel_data[15] += amp; }
+
+                    // 模拟：功能键 -> 激活3个通道的复杂模式
+                    if current_sim_input.space { channel_data[0] += amp; channel_data[1] += amp; channel_data[2] += amp; }
+                    if current_sim_input.key_z { channel_data[2] += amp; channel_data[3] += amp; channel_data[4] += amp; }
+                    if current_sim_input.key_x { channel_data[4] += amp; channel_data[5] += amp; channel_data[6] += amp; }
+                    if current_sim_input.key_c { channel_data[6] += amp; channel_data[7] += amp; channel_data[0] += amp; }
+
+                    // 模拟：肩键
+                    if current_sim_input.u { channel_data[8] += amp; channel_data[9] += amp; channel_data[10] += amp; }
+                    if current_sim_input.o { channel_data[10] += amp; channel_data[11] += amp; channel_data[12] += amp; }
+                    if current_sim_input.q { channel_data[12] += amp; channel_data[13] += amp; channel_data[14] += amp; }
+                    if current_sim_input.e { channel_data[13] += amp; channel_data[14] += amp; channel_data[15] += amp; }
+
+                    // 模拟：方向键 (跨半球连接)
+                    if current_sim_input.arrow_up    { channel_data[0] += amp; channel_data[15] += amp; }
+                    if current_sim_input.arrow_down  { channel_data[3] += amp; channel_data[12] += amp; }
+                    if current_sim_input.arrow_left  { channel_data[4] += amp; channel_data[11] += amp; }
+                    if current_sim_input.arrow_right { channel_data[7] += amp; channel_data[8] += amp; }
+                    
+                    // 伪迹注入
+                    if inject_artifact_frames > 0 {
+                        // 模拟全脑惊吓反应 (所有通道激活)
+                        for i in 0..16 { channel_data[i] += amp; }
+                        inject_artifact_frames -= 1;
+                    }
+
                     thread::sleep(Duration::from_millis(5));
                 } 
-                // --- 分支 B: 硬件模式 ---
+                // === 硬件数据读取 ===
                 else if let Some(lib) = &lib_opt {
                     unsafe {
                         let get_cnt: Symbol<unsafe extern "C" fn(i32, *mut i32) -> i32> = lib.get(b"get_board_data_count").unwrap();
                         let get_dat: Symbol<unsafe extern "C" fn(i32, *mut f64) -> i32> = lib.get(b"get_board_data").unwrap();
                         let get_row: Symbol<unsafe extern "C" fn(i32, *mut i32) -> i32> = lib.get(b"get_num_rows").unwrap();
                         
-                        let mut count = 0; 
-                        get_cnt(2, &mut count);
-                        
+                        let mut count = 0; get_cnt(2, &mut count);
                         if count > 0 {
-                            let mut rows = 0; 
-                            get_row(2, &mut rows);
+                            let mut rows = 0; get_row(2, &mut rows);
                             let mut buf = vec![0.0f64; (rows * count) as usize];
                             get_dat(count, buf.as_mut_ptr());
-                            
-                            // 获取最新一个采样点的数据填充到 channel_data
-                            // 我们只需要最新的一个点来做实时控制
+                            // 取最新一个采样点
                             for i in 0..count {
-                                // === 🔴 修复点：强制类型转换为 usize ===
-                                let current_sample_index = i as usize; 
-                                
-                                // 假设前 16 个通道是 EEG 数据 (对于 Cyton+Daisy 确实如此，通常是 ch 1-16)
-                                // BrainFlow 的数据通常是一维数组：[ch0_data..., ch1_data..., ch2_data...]
-                                // 或者是 [sample0_all_chs, sample1_all_chs...] 
-                                // BrainFlow C API get_board_data 返回的是 Column-Major 还是 Row-Major 取决于具体实现
-                                // 但通常是一行一行的数据。
-                                // 为了保险，我们这里做一个简单的映射测试，假设 rows 是通道数
-                                
+                                let current_sample_index = i as usize;
                                 for c in 0..16 {
-                                    // 计算索引：行号(c + 1) * 总点数 + 当前点(i)
-                                    // 注意：Cyton 的 EEG 数据通常从第 1 行开始 (第 0 行是时间戳/包序号)
-                                    let row_idx = (c + 1) as usize; 
+                                    // Cyton 数据通常从 index 1 开始
+                                    let row_idx = (c + 1) as usize;
                                     let idx = row_idx * (count as usize) + current_sample_index;
-                                    
-                                    if idx < buf.len() {
-                                        channel_data[c] = buf[idx];
-                                    }
+                                    if idx < buf.len() { channel_data[c] = buf[idx]; }
                                 }
                             }
                         }
@@ -189,55 +244,36 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     thread::sleep(Duration::from_millis(5));
                 }
 
-                // 3. 录制数据
+                // 录制原始数据
                 if recorder.is_recording() { recorder.write_record(&channel_data); }
 
-                // 4. 信号处理 (阈值判断)
-                let mut gp = GamepadState::default();
-                
-                // 左摇杆
-                if channel_data[0].abs() > threshold { gp.ly += 1.0; } 
-                if channel_data[1].abs() > threshold { gp.ly -= 1.0; } 
-                if channel_data[2].abs() > threshold { gp.lx -= 1.0; } 
-                if channel_data[3].abs() > threshold { gp.lx += 1.0; } 
+                // === 解码意图 (Processing) ===
+                // 将采集到(或模拟出)的复杂波形，解码为手柄指令
+                let gp = decode_neural_intent(
+                    &channel_data, threshold, 
+                    calib_mode, &mut calib_max_val, calib_start_time, 
+                    &tx
+                );
 
-                // 按键
-                if channel_data[4].abs() > threshold { gp.a = true; }
-                if channel_data[5].abs() > threshold { gp.b = true; }
-                if channel_data[6].abs() > threshold { gp.x = true; }
-                if channel_data[7].abs() > threshold { gp.y = true; }
-                
-                // 右摇杆
-                if channel_data[8].abs() > threshold { gp.ry += 1.0; }
-                if channel_data[9].abs() > threshold { gp.ry -= 1.0; }
-                if channel_data[10].abs() > threshold { gp.rx -= 1.0; }
-                if channel_data[11].abs() > threshold { gp.rx += 1.0; }
-
-                // 校准逻辑
-                if calib_mode {
-                    let max_s = channel_data.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
-                    if max_s > calib_max_val { calib_max_val = max_s; }
-                    if calib_start.elapsed().as_secs() >= 3 {
-                        calib_mode = false;
-                        tx.send(BciMessage::CalibrationResult((), calib_max_val)).ok();
-                    }
-                }
-
-                // 5. vJoy 输出
+                // === 执行 vJoy ===
                 if let Some(joy) = &mut joystick {
-                    joy.set_button(1, gp.a);
-                    joy.set_button(2, gp.b);
-                    joy.set_button(3, gp.x);
-                    joy.set_button(4, gp.y);
+                    joy.set_button(1, gp.a); joy.set_button(2, gp.b);
+                    joy.set_button(3, gp.x); joy.set_button(4, gp.y);
+                    joy.set_button(5, gp.lb); joy.set_button(6, gp.rb); 
+                    joy.set_button(7, gp.lt); joy.set_button(8, gp.rt);
+                    
+                    // 映射 D-Pad
+                    joy.set_button(9, gp.dpad_up); joy.set_button(10, gp.dpad_down);
+                    joy.set_button(11, gp.dpad_left); joy.set_button(12, gp.dpad_right);
                     
                     let to_axis = |v: f32| (16384.0 + v * 16000.0) as i32;
-                    joy.set_axis(0x30, to_axis(gp.lx)); // X
-                    joy.set_axis(0x31, to_axis(gp.ly)); // Y
-                    joy.set_axis(0x32, to_axis(gp.rx)); // Z
-                    joy.set_axis(0x33, to_axis(gp.ry)); // Rx
+                    joy.set_axis(0x30, to_axis(gp.lx)); 
+                    joy.set_axis(0x31, to_axis(gp.ly)); 
+                    joy.set_axis(0x32, to_axis(gp.rx)); 
+                    joy.set_axis(0x33, to_axis(gp.ry)); 
                 }
 
-                // 6. 发送反馈 (降频)
+                // 发送反馈
                 if sim_phase as i32 % 2 == 0 {
                     tx.send(BciMessage::GamepadUpdate(gp)).ok();
                     tx.send(BciMessage::DataPacket(channel_data)).ok();

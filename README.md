@@ -79,6 +79,22 @@ cargo run
     * **I / J / K / L**: Right Stick (Camera)
     * **Space**: Button A (Jump/Confirm)
     * **Z / X / C**: Buttons B / X / Y
+
+### **2.1 🔴 【CRITICAL】Game Recognition Setup (XInput Translation)**
+
+Modern games like Elden Ring only recognize the Xbox (XInput) standard controller, while QNMDsol simulates a generic controller (DirectInput). Therefore, a "translator" is required to bridge this gap.
+
+**We strongly recommend using Steam's built-in "Steam Input" feature for this conversion. It is the cleanest and most stable solution as it requires no file injection.**
+
+#### **Steam Input One-Time Setup Process:**
+
+1.  **Preparation:** Launch Steam and ensure Elden Ring is in your Steam library (add it as a non-Steam game if necessary).
+2.  **Generic Support:** Go to Steam -> **Settings** -> **Controller** -> Check **"Enable Generic Gamepad Configuration Support"**.
+3.  **Enable Steam Input:** In the Steam Library, right-click Elden Ring -> **Properties** -> **Controller** -> Select **"Enable Steam Input"**.
+4.  **Button Mapping:** Click **"Controller Layout"**. You must manually map the signals output by QNMDsol (e.g., **Button 1**, **Axis X/Y**) to the corresponding standard **Xbox 360 Buttons** (e.g., A button, Left Stick).
+    * **💡 Tip:** To find the correct binding, run QNMDsol in **SIM mode** first, press the keyboard keys (`W/A/S/D`), and observe which axis is moving in the Steam mapping interface.
+
+After completing these steps, the game will be able to recognize your mind-controlled gamepad.
     
 ### 3. Run Hardware Mode
 Plug in the OpenBCI Dongle (Default: COM4).

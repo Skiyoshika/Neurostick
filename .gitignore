@@ -7,6 +7,8 @@
 # 依赖的 DLL 和 Lib (太大了，且每个人环境不同，不应该传)
 *.dll
 *.lib
+*.so          # Linux 动态库
+*.dylib       # macOS 动态库
 
 # Python 缓存
 __pycache__/
