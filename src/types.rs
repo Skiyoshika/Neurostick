@@ -8,7 +8,8 @@ pub enum ConnectionMode {
 
 #[derive(Clone, Debug)]
 pub enum GuiCommand {
-    Connect(ConnectionMode),
+    // === 修改：Connect 现在接收 (模式, 端口名) ===
+    Connect(ConnectionMode, String), 
     Disconnect,
     StartStream,
     StopStream,
@@ -17,8 +18,7 @@ pub enum GuiCommand {
     UpdateSimInput(SimInputIntent),
     StartRecording(String), 
     StopRecording,
-    // === 修复：统一命名为 InjectArtifact ===
-    InjectArtifact, 
+    InjectArtifact,
 }
 
 #[derive(Clone, Debug)]

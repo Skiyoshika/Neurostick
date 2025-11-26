@@ -8,6 +8,7 @@ edition = "2021"
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.10"
+serialport = "4.2"
 
 # 数学库
 ndarray = "0.15"
@@ -23,6 +24,4 @@ serde_json = "1.0"
 # 如果你不想升级，保持 0.24 也可以，但必须加下面的 winapi
 eframe = "0.24"
 egui_plot = "0.24"
-
-# ===关键修复：强制开启 Windows API 功能===
 winapi = { version = "0.3.9", features = ["winuser", "windef"] }

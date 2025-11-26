@@ -1,25 +1,27 @@
 // src/gui.rs
 use crate::engine;
 use crate::types::*;
-// 引入我们刚刚写好的模块
-use crate::visualizer; 
-
+use crate::visualizer;
 use eframe::egui;
 use egui::{Color32, Vec2};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints};
 use std::sync::mpsc::{channel, Receiver, Sender};
+// 引入串口库
+use serialport;
 
 pub struct QnmdSolApp {
     is_connected: bool, is_vjoy_active: bool, is_streaming: bool, is_recording: bool,
     connection_mode: ConnectionMode, follow_latest: bool,
-    time: f64,
-    wave_buffers: Vec<Vec<[f64; 2]>>,
-    view_seconds: f64, display_gain: f64, vertical_spacing: f64,
+    time: f64, wave_buffers: Vec<Vec<[f64; 2]>>, view_seconds: f64, display_gain: f64, vertical_spacing: f64,
     gamepad_target: GamepadState, gamepad_visual: GamepadState,
     calib_rest_max: f64, calib_act_max: f64, is_calibrating: bool, calib_timer: f32,
     trigger_threshold: f64, record_label: String, language: Language, has_started: bool,
     selected_tab: String, log_messages: Vec<String>,
     rx: Receiver<BciMessage>, tx_cmd: Sender<GuiCommand>,
+    
+    // === 新增：端口管理 ===
+    available_ports: Vec<String>,
+    selected_port: String,
 }
 
 impl Default for QnmdSolApp {
@@ -28,6 +30,16 @@ impl Default for QnmdSolApp {
         let (tx_cmd, rx_cmd) = channel();
         engine::spawn_thread(tx, rx_cmd);
         let buffers = vec![Vec::new(); 16];
+        
+        // === 自动扫描端口 ===
+        let mut ports = Vec::new();
+        if let Ok(available) = serialport::available_ports() {
+            for p in available {
+                ports.push(p.port_name);
+            }
+        }
+        let default_port = if !ports.is_empty() { ports[0].clone() } else { "COM3".to_string() };
+
         Self {
             is_connected: false, is_vjoy_active: false, is_streaming: false, is_recording: false,
             connection_mode: ConnectionMode::Simulation, follow_latest: true,
@@ -38,6 +50,9 @@ impl Default for QnmdSolApp {
             trigger_threshold: 200.0, record_label: Language::English.default_record_label().to_owned(),
             language: Language::English, has_started: false,
             rx, tx_cmd,
+            // === 初始化端口字段 ===
+            available_ports: ports,
+            selected_port: default_port,
         }
     }
 }
@@ -47,6 +62,20 @@ impl QnmdSolApp {
     fn reset_localized_defaults(&mut self) { self.log_messages.clear(); self.log(self.text(UiText::Ready)); self.record_label = self.language.default_record_label().to_owned(); }
     fn log(&mut self, msg: &str) { self.log_messages.push(format!("> {}", msg)); if self.log_messages.len() > 8 { self.log_messages.remove(0); } }
     fn lerp(current: f32, target: f32, speed: f32) -> f32 { current + (target - current) * speed }
+
+    // 刷新端口列表
+    fn refresh_ports(&mut self) {
+        self.available_ports.clear();
+        if let Ok(available) = serialport::available_ports() {
+            for p in available {
+                self.available_ports.push(p.port_name);
+            }
+        }
+        if !self.available_ports.is_empty() && !self.available_ports.contains(&self.selected_port) {
+            self.selected_port = self.available_ports[0].clone();
+        }
+        self.log(&format!("Ports Scanned: {:?}", self.available_ports));
+    }
 
     fn show_start_screen(&mut self, ctx: &egui::Context) {
         let mut visuals = egui::Visuals::light();
@@ -80,6 +109,7 @@ impl eframe::App for QnmdSolApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.has_started { self.show_start_screen(ctx); return; }
 
+        // 键盘输入 (Sim Mode) - 保持不变
         if self.connection_mode == ConnectionMode::Simulation {
             let mut input = SimInputIntent::default();
             if ctx.input(|i| i.key_down(egui::Key::W)) { input.w = true; }
@@ -105,12 +135,12 @@ impl eframe::App for QnmdSolApp {
             self.tx_cmd.send(GuiCommand::UpdateSimInput(input)).ok();
         }
 
+        // 消息处理
         let mut msg_count = 0;
         while let Ok(msg) = self.rx.try_recv() {
             msg_count += 1;
-            if msg_count > 20 {
-                match msg { BciMessage::GamepadUpdate(gp) => self.gamepad_target = gp, _ => continue, }
-            } else {
+            if msg_count > 20 { match msg { BciMessage::GamepadUpdate(gp) => self.gamepad_target = gp, _ => continue, } } 
+            else {
                 match msg {
                     BciMessage::Log(s) => self.log(&s),
                     BciMessage::Status(b) => self.is_connected = b,
@@ -143,6 +173,7 @@ impl eframe::App for QnmdSolApp {
             }
         }
         
+        // 动画插值
         let speed = 0.3;
         self.gamepad_visual.lx = Self::lerp(self.gamepad_visual.lx, self.gamepad_target.lx, speed);
         self.gamepad_visual.ly = Self::lerp(self.gamepad_visual.ly, self.gamepad_target.ly, speed);
@@ -179,9 +210,33 @@ impl eframe::App for QnmdSolApp {
                 ui.selectable_value(&mut self.connection_mode, ConnectionMode::Simulation, sim_label);
                 ui.selectable_value(&mut self.connection_mode, ConnectionMode::Hardware, real_label);
             });
+
+            // === 新增：端口选择器 (仅在 Hardware 模式显示) ===
+            if self.connection_mode == ConnectionMode::Hardware {
+                ui.horizontal(|ui| {
+                    ui.label("Port:");
+                    egui::ComboBox::from_id_source("port_selector")
+                        .selected_text(&self.selected_port)
+                        .show_ui(ui, |ui| {
+                            for p in &self.available_ports {
+                                ui.selectable_value(&mut self.selected_port, p.clone(), p);
+                            }
+                        });
+                    if ui.button("↻").clicked() {
+                        self.refresh_ports();
+                    }
+                });
+            }
+            // ================================================
+
             let btn_txt = if self.is_connected { self.text(UiText::Disconnect) } else { self.text(UiText::Connect) };
             if ui.button(btn_txt).clicked() {
-                if !self.is_connected { self.tx_cmd.send(GuiCommand::Connect(self.connection_mode)).unwrap(); } else { self.tx_cmd.send(GuiCommand::Disconnect).unwrap(); }
+                if !self.is_connected { 
+                    // 传递选中的端口
+                    self.tx_cmd.send(GuiCommand::Connect(self.connection_mode, self.selected_port.clone())).unwrap(); 
+                } else { 
+                    self.tx_cmd.send(GuiCommand::Disconnect).unwrap(); 
+                }
             }
             if self.is_connected {
                 let stream_btn = if self.is_streaming { self.text(UiText::StopStream) } else { self.text(UiText::StartStream) };
@@ -192,11 +247,15 @@ impl eframe::App for QnmdSolApp {
                 if ui.button(self.text(UiText::ResetView)).clicked() { for buf in &mut self.wave_buffers { buf.clear(); } self.time = 0.0; }
                 let follow_label = if self.follow_latest { self.text(UiText::FollowOn) } else { self.text(UiText::FollowOff) };
                 if ui.button(follow_label).clicked() { self.follow_latest = !self.follow_latest; }
+                
+                if self.connection_mode == ConnectionMode::Simulation && self.is_streaming {
+                    ui.separator();
+                    if ui.button("⚡ TEST BITE").clicked() { self.tx_cmd.send(GuiCommand::InjectArtifact).unwrap(); }
+                }
             }
             ui.add_space(20.0);
             ui.label(self.text(UiText::Controller));
             
-            // === 核心：调用分离出来的 visualizer 模块 ===
             visualizer::draw_xbox_controller(ui, &self.gamepad_visual);
             
             ui.add_space(20.0);
@@ -222,7 +281,7 @@ impl eframe::App for QnmdSolApp {
                         if self.connection_mode == ConnectionMode::Simulation && self.is_streaming { ui.label(egui::RichText::new(self.text(UiText::KeyHint)).strong().color(Color32::YELLOW)); }
                     } else { ui.label(self.text(UiText::ConnectFirst)); }
                 });
-                Plot::new("main_plot").view_aspect(2.0).include_y(0.0).auto_bounds_x().allow_drag(!self.follow_latest).allow_zoom(!self.follow_latest).show(ui, |plot_ui| {
+                Plot::new("main_plot").view_aspect(2.0).include_y(0.0).auto_bounds_x().auto_bounds_y().allow_drag(!self.follow_latest).allow_zoom(!self.follow_latest).show(ui, |plot_ui| {
                     let colors = [
                         Color32::from_rgb(0, 255, 255), Color32::from_rgb(0, 255, 255), Color32::from_rgb(0, 200, 255), Color32::from_rgb(0, 170, 255),
                         Color32::YELLOW, Color32::from_rgb(240, 220, 80), Color32::from_rgb(230, 200, 0), Color32::from_rgb(210, 170, 0),
@@ -240,9 +299,9 @@ impl eframe::App for QnmdSolApp {
                     if self.follow_latest && self.time > 0.0 {
                         let x_max = self.time;
                         let x_min = (x_max - self.view_seconds).max(0.0);
-                        let margin = self.vertical_spacing * 0.3;
+                        let margin = if max_y > min_y { (max_y - min_y) * 0.1 } else { 10.0 };
                         let y_min = if min_y.is_finite() { min_y - margin } else { -1000.0 };
-                        let y_max = if max_y.is_finite() { max_y + margin } else { self.vertical_spacing * self.wave_buffers.len() as f64 };
+                        let y_max = if max_y.is_finite() { max_y + margin } else { 1000.0 };
                         plot_ui.set_plot_bounds(PlotBounds::from_min_max([x_min, y_min], [x_max + 0.5, y_max]));
                     }
                 });
