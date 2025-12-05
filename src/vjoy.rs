@@ -36,19 +36,25 @@ impl VJoyClient {
     fn acquire(&self) -> Result<()> {
         unsafe {
             let func: Symbol<FnAcquire> = self.lib.get(b"AcquireVJD")?;
-            if func(self.device_id) == 0 { return Err(anyhow!("Acquire Failed")); }
+            if func(self.device_id) == 0 {
+                return Err(anyhow!("Acquire Failed"));
+            }
             Ok(())
         }
     }
 
     pub fn reset(&self) {
-        unsafe { if let Ok(f) = self.lib.get::<FnReset>(b"ResetVJD") { f(self.device_id); } }
+        unsafe {
+            if let Ok(f) = self.lib.get::<FnReset>(b"ResetVJD") {
+                f(self.device_id);
+            }
+        }
     }
 
     pub fn set_button(&self, btn_id: u8, down: bool) {
         unsafe {
             if let Ok(f) = self.lib.get::<FnSetBtn>(b"SetBtn") {
-                f(if down {1} else {0}, self.device_id, btn_id);
+                f(if down { 1 } else { 0 }, self.device_id, btn_id);
             }
         }
     }
@@ -64,6 +70,10 @@ impl VJoyClient {
 
 impl Drop for VJoyClient {
     fn drop(&mut self) {
-        unsafe { if let Ok(f) = self.lib.get::<FnRelinquish>(b"RelinquishVJD") { f(self.device_id); } }
+        unsafe {
+            if let Ok(f) = self.lib.get::<FnRelinquish>(b"RelinquishVJD") {
+                f(self.device_id);
+            }
+        }
     }
 }

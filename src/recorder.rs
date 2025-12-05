@@ -9,18 +9,28 @@ pub struct DataRecorder {
 
 impl DataRecorder {
     pub fn new() -> Self {
-        Self { writer: None, start_time: SystemTime::now() }
+        Self {
+            writer: None,
+            start_time: SystemTime::now(),
+        }
     }
 
     pub fn start(&mut self, label: &str) {
         // 文件名带时间戳和标签，方便后续 AI 识别
-        let timestamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let timestamp = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let filename = format!("training_data_{}_{}.csv", label, timestamp);
-        
+
         if let Ok(file) = File::create(&filename) {
             let mut w = BufWriter::new(file);
             // 写入 CSV 表头: Timestamp, Ch0 ... Ch15
-            writeln!(w, "Timestamp,Ch0,Ch1,Ch2,Ch3,Ch4,Ch5,Ch6,Ch7,Ch8,Ch9,Ch10,Ch11,Ch12,Ch13,Ch14,Ch15").ok();
+            writeln!(
+                w,
+                "Timestamp,Ch0,Ch1,Ch2,Ch3,Ch4,Ch5,Ch6,Ch7,Ch8,Ch9,Ch10,Ch11,Ch12,Ch13,Ch14,Ch15"
+            )
+            .ok();
             self.writer = Some(w);
             println!("💾 Recording started: {}", filename);
         }

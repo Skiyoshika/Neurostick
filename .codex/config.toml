@@ -1,0 +1,10 @@
+sandbox_mode = "workspace-write"
+
+[workspace_write]
+exclude_tmpdir_env_var = false
+exclude_slash_tmp = false
+
+# 你想让 Codex 有额外写入权限的目录（可选）
+writable_roots = [
+    "/Users/YOU/.pyenv/shims"
+]
