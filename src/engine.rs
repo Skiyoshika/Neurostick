@@ -4,8 +4,6 @@ use crate::openbci::OpenBciSession;
 use crate::recorder::DataRecorder;
 use crate::types::*;
 use crate::vjoy::VJoyClient;
-use rustfft::{num_complex::Complex32, FftPlanner};
-use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
@@ -198,73 +196,6 @@ fn process_neural_intent(
     gp
 }
 
-fn hann_window(n: usize) -> Vec<f32> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let denom = (n - 1).max(1) as f32;
-    (0..n)
-        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * (i as f32) / denom).cos())
-        .collect()
-}
-
-fn bandpower_fft(samples: &VecDeque<f64>, fs: f32, f_lo: f32, f_hi: f32) -> Option<f64> {
-    let n = samples.len();
-    if n < 64 || fs <= 0.0 || f_lo <= 0.0 || f_hi <= f_lo {
-        return None;
-    }
-
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(n);
-    let window = hann_window(n);
-
-    let mut buffer: Vec<Complex32> = samples
-        .iter()
-        .copied()
-        .zip(window.iter().copied())
-        .map(|(v, w)| Complex32::new((v as f32) * w, 0.0))
-        .collect();
-    fft.process(&mut buffer);
-
-    let hz_per_bin = fs / n as f32;
-    let bin_lo = (f_lo / hz_per_bin).floor().max(0.0) as usize;
-    let bin_hi = (f_hi / hz_per_bin).ceil().max(0.0) as usize;
-    let max_bin = (n / 2).saturating_sub(1);
-
-    let mut p = 0.0f64;
-    for k in bin_lo..=bin_hi.min(max_bin) {
-        let mag = buffer[k].norm() as f64;
-        p += mag * mag;
-    }
-    Some(p / n as f64)
-}
-
-struct EegJoystickState {
-    rest_mu_power: Option<f64>,
-    act_mu_power: Option<f64>,
-    calib_running: bool,
-    calib_is_action: bool,
-    calib_started: Instant,
-    calib_sum: f64,
-    calib_n: usize,
-    ly_smooth: f32,
-}
-
-impl Default for EegJoystickState {
-    fn default() -> Self {
-        Self {
-            rest_mu_power: None,
-            act_mu_power: None,
-            calib_running: false,
-            calib_is_action: false,
-            calib_started: Instant::now(),
-            calib_sum: 0.0,
-            calib_n: 0,
-            ly_smooth: 0.0,
-        }
-    }
-}
-
 pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
     thread::spawn(move || {
         tx.send(BciMessage::Log("⚙️ Engine V14.0 (DSP Integrated)".to_owned())).ok();
@@ -281,6 +212,7 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
         let mut recorder = DataRecorder::new();
         let mut openbci: Option<OpenBciSession> = None;
         let mut signal_buffer: Option<SignalBuffer> = None;
+        let mut channel_labels: Vec<String> = Vec::new();
         
         // 默认采样率
         let mut current_sample_rate_hz: f32 = 250.0; 
@@ -299,30 +231,12 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
         let mut calib_max_val = 0.0;
         let mut calib_start_time = Instant::now();
 
-        // Channel labels based on OpenBCI 16ch 10-20 montage (user follows official wiring).
-        // This also lets us refer to channels by semantic names like C3/C4.
-        let montage_labels: Vec<String> = vec![
-            "FP1", "FP2", "C3", "C4", "P7", "P8", "O1", "O2", "F7", "F8", "F3", "F4", "T7",
-            "T8", "P3", "P4",
-        ]
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
-        let ch_c3 = montage_labels.iter().position(|s| s == "C3").unwrap_or(2);
-        let ch_c4 = montage_labels.iter().position(|s| s == "C4").unwrap_or(3);
-        let mut c3_buf: VecDeque<f64> = VecDeque::with_capacity(256);
-        let mut c4_buf: VecDeque<f64> = VecDeque::with_capacity(256);
-        let mut eeg_joy = EegJoystickState::default();
-
         // 缓存区
         let mut raw_channel_data = vec![0.0f64; 16];
         let mut clean_channel_data = vec![0.0f64; 16];
-        let mut hw_sample_logged = false;
 
         // 循环控制
         let mut last_vjoy_update = Instant::now();
-        let mut last_ui_frame_sent = Instant::now();
-        let ui_frame_interval = Duration::from_millis(33); // ~30 FPS snapshots
 
         loop {
             // 1. 处理 GUI 命令 (非阻塞)
@@ -365,19 +279,7 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         tx.send(BciMessage::Log("🛑 Stream Stopped".to_owned())).ok();
                     }
                     GuiCommand::SetThreshold(v) => threshold = v,
-                    GuiCommand::StartCalibration(is_action) => {
-                        // Repurpose calibration to compute µ-band power baseline for EEG->joystick.
-                        eeg_joy.calib_running = true;
-                        eeg_joy.calib_is_action = is_action;
-                        eeg_joy.calib_started = Instant::now();
-                        eeg_joy.calib_sum = 0.0;
-                        eeg_joy.calib_n = 0;
-
-                        // Keep legacy flags for GUI countdown/progress.
-                        calib_mode = true;
-                        calib_max_val = 0.0;
-                        calib_start_time = Instant::now();
-                    }
+                    GuiCommand::StartCalibration(_) => { calib_mode = true; calib_max_val = 0.0; calib_start_time = Instant::now(); }
                     GuiCommand::UpdateSimInput(input) => current_sim_input = input,
                     GuiCommand::StartRecording(l) => { recorder.start(&l); tx.send(BciMessage::RecordingStatus(true)).ok(); }
                     GuiCommand::StopRecording => { recorder.stop(); tx.send(BciMessage::RecordingStatus(false)).ok(); }
@@ -397,23 +299,7 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     raw_channel_data.fill(0.0);
                     // ... (此处省略太长的模拟输入判定，保持原样即可，重点是后面)
                     // 为了演示简单，这里只保留一部分模拟逻辑
-                    let mut bump = |idx: usize| {
-                        if let Some(v) = raw_channel_data.get_mut(idx) {
-                            *v += 500.0;
-                        }
-                    };
-
-                    // WASD -> Left stick
-                    if current_sim_input.w { for &i in &[0, 4, 8] { bump(i); } }
-                    if current_sim_input.s { for &i in &[1, 5, 9] { bump(i); } }
-                    if current_sim_input.a { for &i in &[2, 6, 10] { bump(i); } }
-                    if current_sim_input.d { for &i in &[3, 7, 11] { bump(i); } }
-
-                    // Buttons
-                    if current_sim_input.space { for &i in &[0, 1, 2] { bump(i); } } // A
-                    if current_sim_input.key_z { for &i in &[3, 4, 5] { bump(i); } } // B
-                    if current_sim_input.key_x { for &i in &[6, 7, 8] { bump(i); } } // X
-                    if current_sim_input.key_c { for &i in &[9, 10, 11] { bump(i); } } // Y
+                    if current_sim_input.w { raw_channel_data[0] += 500.0; }
                     
                     // 模拟模式也加上一点随机漂移，测试滤波器
                     for v in raw_channel_data.iter_mut() { *v += noise; }
@@ -425,16 +311,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         Ok(Some(sample)) => {
                             for (i, v) in sample.iter().take(16).enumerate() {
                                 raw_channel_data[i] = *v;
-                            }
-                            if !hw_sample_logged {
-                                let first_vals: Vec<f64> = sample.iter().take(16).cloned().collect();
-                                tx.send(BciMessage::Log(format!(
-                                    "HW sample len={} first16={:?}",
-                                    sample.len(),
-                                    first_vals
-                                )))
-                                .ok();
-                                hw_sample_logged = true;
                             }
                             has_new_data = true;
                         }
@@ -454,7 +330,7 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         let filtered = filters.process_sample(i, raw_channel_data[i]);
                         // BrainFlow 返回的 Cyton 数据是伏特级别，UI/阈值逻辑使用微伏，统一缩放
                         clean_channel_data[i] = if current_mode == ConnectionMode::Hardware {
-                            filtered * 1e6 * 2.0 // 额外放大一倍，便于观察
+                            filtered * 1e6
                         } else {
                             filtered
                         };
@@ -462,18 +338,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
 
                     // 录制原始数据(Raw)还是干净数据(Clean)? 
                     // 建议录制 Raw，方便以后调整算法。但为了演示效果，这里我们把 Clean 发给 UI
-                    // Maintain EEG rolling window for µ-band power (C3/C4).
-                    if current_mode == ConnectionMode::Hardware {
-                        let push_fixed = |buf: &mut VecDeque<f64>, v: f64| {
-                            if buf.len() == buf.capacity() {
-                                buf.pop_front();
-                            }
-                            buf.push_back(v);
-                        };
-                        push_fixed(&mut c3_buf, clean_channel_data.get(ch_c3).copied().unwrap_or(0.0));
-                        push_fixed(&mut c4_buf, clean_channel_data.get(ch_c4).copied().unwrap_or(0.0));
-                    }
-
                     if recorder.is_recording() {
                         recorder.write_record(&raw_channel_data);
                     }
@@ -481,12 +345,8 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     // === 发送数据给 UI 渲染 ===
                     // 初始化 Buffer (如果为空)
                     if signal_buffer.is_none() {
-                        signal_buffer = SignalBuffer::with_history_seconds(
-                            montage_labels.clone(),
-                            current_sample_rate_hz,
-                            10.0,
-                        )
-                        .ok();
+                        let labels: Vec<String> = (0..16).map(|i| format!("Ch{}", i+1)).collect();
+                        signal_buffer = SignalBuffer::with_history_seconds(labels, current_sample_rate_hz, 10.0).ok();
                     }
 
                     if let Some(buf) = signal_buffer.as_mut() {
@@ -501,67 +361,18 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                         
                         // 降低 UI 刷新频率，比如每 4 个采样发一次 GUI，或者只发最新的 snapshot
                         // 为了流畅度，这里每次都发，但 GUI 端要注意性能
-                        if last_ui_frame_sent.elapsed() >= ui_frame_interval {
-                            tx.send(BciMessage::DataFrame(buf.snapshot(5.0))).ok();
-                            last_ui_frame_sent = Instant::now();
-                        }
+                        tx.send(BciMessage::DataFrame(buf.snapshot(5.0))).ok();
                     }
 
                     // === 神经解码 (使用干净数据) ===
-                    let mut gp = GamepadState::default();
-                    if current_mode == ConnectionMode::Hardware {
-                        let fs = current_sample_rate_hz;
-                        let mu_c3 = bandpower_fft(&c3_buf, fs, 8.0, 12.0);
-                        let mu_c4 = bandpower_fft(&c4_buf, fs, 8.0, 12.0);
-                        let mu = match (mu_c3, mu_c4) {
-                            (Some(a), Some(b)) => Some((a + b) / 2.0),
-                            (Some(a), None) => Some(a),
-                            (None, Some(b)) => Some(b),
-                            _ => None,
-                        };
-
-                        if eeg_joy.calib_running {
-                            if let Some(p) = mu {
-                                eeg_joy.calib_sum += p;
-                                eeg_joy.calib_n += 1;
-                            }
-                            if eeg_joy.calib_started.elapsed().as_secs_f32() >= 3.0 {
-                                eeg_joy.calib_running = false;
-                                let avg = if eeg_joy.calib_n > 0 {
-                                    eeg_joy.calib_sum / eeg_joy.calib_n as f64
-                                } else {
-                                    0.0
-                                };
-                                if eeg_joy.calib_is_action {
-                                    eeg_joy.act_mu_power = Some(avg);
-                                } else {
-                                    eeg_joy.rest_mu_power = Some(avg);
-                                }
-                                tx.send(BciMessage::CalibrationResult((), avg)).ok();
-                                calib_mode = false;
-                            }
-                        }
-
-                        if let (Some(rest), Some(act), Some(cur)) =
-                            (eeg_joy.rest_mu_power, eeg_joy.act_mu_power, mu)
-                        {
-                            let denom = (rest - act).abs().max(1e-9);
-                            let mut norm = ((rest - cur) / denom) as f32;
-                            norm = norm.clamp(0.0, 1.0);
-                            let alpha = 0.18;
-                            eeg_joy.ly_smooth = (1.0 - alpha) * eeg_joy.ly_smooth + alpha * norm;
-                            gp.ly = if eeg_joy.ly_smooth < 0.08 { 0.0 } else { eeg_joy.ly_smooth };
-                        }
-                    } else {
-                        gp = process_neural_intent(
-                            &clean_channel_data,
-                            threshold,
-                            calib_mode,
-                            &mut calib_max_val,
-                            calib_start_time,
-                            &tx,
-                        );
-                    }
+                    let gp = process_neural_intent(
+                        &clean_channel_data, 
+                        threshold, 
+                        calib_mode, 
+                        &mut calib_max_val, 
+                        calib_start_time, 
+                        &tx
+                    );
 
                     // === 驱动 vJoy ===
                     // 只有当状态发生改变 或 每隔一定时间才更新，减少系统调用开销
@@ -569,24 +380,8 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     if let Some(joy) = &mut joystick {
                         joy.set_button(1, gp.a);
                         joy.set_button(2, gp.b);
-                        joy.set_button(3, gp.x);
-                        joy.set_button(4, gp.y);
-                        joy.set_button(5, gp.lb);
-                        joy.set_button(6, gp.rb);
-                        joy.set_button(7, gp.lt);
-                        joy.set_button(8, gp.rt);
-                        joy.set_button(9, gp.dpad_up);
-                        joy.set_button(10, gp.dpad_down);
-                        joy.set_button(11, gp.dpad_left);
-                        joy.set_button(12, gp.dpad_right);
-                        let axis = |v: f32| -> i32 {
-                            let v = v.clamp(-1.0, 1.0) as f64;
-                            (16384.0 + v * 16000.0) as i32
-                        };
-                        joy.set_axis(0x30, axis(gp.lx));
-                        joy.set_axis(0x31, axis(gp.ly));
-                        joy.set_axis(0x33, axis(gp.rx));
-                        joy.set_axis(0x34, axis(gp.ry));
+                        joy.set_axis(0x30, (16384.0 + gp.lx * 16000.0) as i32);
+                        joy.set_axis(0x31, (16384.0 + gp.ly * 16000.0) as i32);
                         // ... 其他按键映射同理
                     }
                     

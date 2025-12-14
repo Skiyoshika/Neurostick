@@ -15,10 +15,29 @@ use crate::waveform::{
 use eframe::egui;
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions, Vec2};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints, Text};
+use serde::Deserialize;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::{fs, io::Write, path::PathBuf, time::Instant, time::SystemTime};
 // 引入串口库
 use serialport;
+
+#[derive(Debug, Clone, Deserialize)]
+struct BrainModel {
+    version: Option<String>,
+    n_channels: usize,
+    csp_filters: Option<Vec<Vec<f64>>>,
+    lda_coef: Option<Vec<Vec<f64>>>,
+    lda_intercept: Option<Vec<f64>>,
+    classes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct BrainModelStatus {
+    path: String,
+    loaded_at: SystemTime,
+    info: BrainModel,
+}
+
 pub struct QnmdSolApp {
     is_connected: bool,
     is_vjoy_active: bool,
@@ -81,6 +100,11 @@ pub struct QnmdSolApp {
     // 控制面板开关与宽度
     control_panel_open: bool,
     control_panel_width: f32,
+    // 模型状态
+    model_path: String,
+    model_status: Option<BrainModelStatus>,
+    model_error: Option<String>,
+    model_scores: Option<Vec<f32>>,
 }
 impl Default for QnmdSolApp {
     fn default() -> Self {
@@ -100,7 +124,7 @@ impl Default for QnmdSolApp {
             "COM3".to_string()
         };
         let language = QnmdSolApp::load_language_from_disk().unwrap_or(Language::English);
-        Self {
+        let mut app = Self {
             is_connected: false,
             is_vjoy_active: false,
             is_streaming: false,
@@ -161,7 +185,13 @@ impl Default for QnmdSolApp {
             selected_port: default_port,
             control_panel_open: true,
             control_panel_width: 320.0,
-        }
+            model_path: "brain_model.json".to_string(),
+            model_status: None,
+            model_error: None,
+            model_scores: None,
+        };
+        app.autoload_model();
+        app
     }
 }
 impl QnmdSolApp {
@@ -294,6 +324,41 @@ impl QnmdSolApp {
             writeln!(f, "  {msg}")?;
         }
         Ok(path.to_string_lossy().to_string())
+    }
+    fn load_model_from_path(&mut self, path: &str) -> Result<(), String> {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            self.model_status = None;
+            self.model_error = Some("Empty model path".to_string());
+            return Err("Empty model path".to_string());
+        }
+        let raw = fs::read_to_string(trimmed).map_err(|e| e.to_string())?;
+        let info: BrainModel = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let status = BrainModelStatus {
+            path: trimmed.to_string(),
+            loaded_at: SystemTime::now(),
+            info,
+        };
+        let msg = format!(
+            "Model loaded: {} ({} classes, {} channels)",
+            status.path,
+            status.info.classes.len(),
+            status.info.n_channels
+        );
+        self.model_status = Some(status);
+        self.model_error = None;
+        self.model_scores = None;
+        self.log(&msg);
+        Ok(())
+    }
+    fn autoload_model(&mut self) {
+        let path = self.model_path.clone();
+        if PathBuf::from(&path).exists() {
+            let _ = self.load_model_from_path(&path);
+        } else {
+            self.model_status = None;
+            self.model_error = Some("Model file not found".to_string());
+        }
     }
     fn text(&self, key: UiText) -> &'static str {
         self.language.text(key)
@@ -1238,7 +1303,9 @@ impl eframe::App for QnmdSolApp {
                         self.gamepad_target = gp;
                         self.last_gamepad_update = Some(Instant::now());
                     }
-                    BciMessage::ModelPrediction(_) => {}
+                    BciMessage::ModelPrediction(scores) => {
+                        self.model_scores = Some(scores);
+                    }
                     _ => continue,
                 }
             } else {
@@ -1258,7 +1325,9 @@ impl eframe::App for QnmdSolApp {
                         self.gamepad_target = gp;
                         self.last_gamepad_update = Some(Instant::now());
                     }
-                    BciMessage::ModelPrediction(_) => {}
+                    BciMessage::ModelPrediction(scores) => {
+                        self.model_scores = Some(scores);
+                    }
                     BciMessage::RecordingStatus(b) => self.is_recording = b,
                     BciMessage::Spectrum(spec) => {
                         self.last_spectrum = Some(spec);
@@ -1504,6 +1573,47 @@ impl eframe::App for QnmdSolApp {
                                 self.refresh_ports();
                             }
                         }
+                        ui.separator();
+                        ui.heading(self.text(UiText::ModelSection));
+                        ui.horizontal(|ui| {
+                            ui.label(self.text(UiText::ModelPath));
+                            ui.text_edit_singleline(&mut self.model_path);
+                        });
+                        let path_to_load = self.model_path.clone();
+                        if ui.button(self.text(UiText::ModelReload)).clicked() {
+                            if let Err(e) = self.load_model_from_path(&path_to_load) {
+                                self.model_error = Some(e.clone());
+                                let msg = match self.language {
+                                    Language::English => format!("Model load failed: {e}"),
+                                    Language::Chinese => format!("模型加载失败: {e}"),
+                                };
+                                self.log(&msg);
+                            }
+                        }
+                        if let Some(status) = &self.model_status {
+                            ui.label(format!(
+                                "{}: {}",
+                                self.text(UiText::ModelLoaded),
+                                status.path
+                            ));
+                            ui.label(format!(
+                                "{}: {}",
+                                self.text(UiText::ModelChannels),
+                                status.info.n_channels
+                            ));
+                            ui.label(format!(
+                                "{}: {}",
+                                self.text(UiText::ModelClasses),
+                                status.info.classes.join(", ")
+                            ));
+                        } else if let Some(err) = &self.model_error {
+                            ui.colored_label(
+                                Color32::from_rgb(200, 60, 60),
+                                format!("{}: {err}", self.text(UiText::ModelError)),
+                            );
+                        } else {
+                            ui.label(self.text(UiText::ModelNone));
+                        }
                         let connect_label = if self.is_connected {
                             self.text(UiText::Disconnect)
                         } else {
@@ -1661,6 +1771,33 @@ impl eframe::App for QnmdSolApp {
                 ui.label(self.text(UiText::Controller));
                 visualizer::draw_xbox_controller(ui, &self.gamepad_visual);
                 ui.separator();
+                ui.label(self.text(UiText::ModelOutput));
+                if let Some(status) = &self.model_status {
+                    let classes = &status.info.classes;
+                    let scores = self
+                        .model_scores
+                        .clone()
+                        .unwrap_or_else(|| vec![0.0; classes.len()]);
+                    for (idx, name) in classes.iter().enumerate() {
+                        let v = scores.get(idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                        ui.horizontal(|ui| {
+                            ui.label(name);
+                            ui.add(
+                                egui::ProgressBar::new(v)
+                                    .show_percentage()
+                                    .desired_width(140.0),
+                            );
+                        });
+                    }
+                } else if let Some(err) = &self.model_error {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 60, 60),
+                        format!("{}: {err}", self.text(UiText::ModelError)),
+                    );
+                } else {
+                    ui.label(self.text(UiText::ModelNone));
+                }
+                ui.separator();
                 ui.label(self.text(UiText::Logs));
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
@@ -1782,6 +1919,15 @@ impl Language {
             (Language::English, UiText::ImpedanceLegend) => {
                 "Good <500k | Acceptable 0.5-2.5M | Poor >2.5M | Railed = no contact"
             }
+            (Language::English, UiText::ModelSection) => "AI Model",
+            (Language::English, UiText::ModelPath) => "Path",
+            (Language::English, UiText::ModelReload) => "Load / Reload",
+            (Language::English, UiText::ModelLoaded) => "Model",
+            (Language::English, UiText::ModelNone) => "No model loaded.",
+            (Language::English, UiText::ModelError) => "Model error",
+            (Language::English, UiText::ModelClasses) => "Classes",
+            (Language::English, UiText::ModelChannels) => "Channels",
+            (Language::English, UiText::ModelOutput) => "Model Output",
             (Language::Chinese, UiText::Title) => "QNMDsol 演示 v0.1",
             (Language::Chinese, UiText::Subtitle) => "神经接口控制",
             (Language::Chinese, UiText::Sim) => "模拟模式",
@@ -1797,10 +1943,10 @@ impl Language {
             (Language::Chinese, UiText::HardwareRequired) => "需要硬件设备",
             (Language::Chinese, UiText::KeyHint) => "键盘提示：WASD / 空格 / ZXC / QEUO / 方向键",
             (Language::Chinese, UiText::ConnectFirst) => "请先连接设备。",
-            (Language::Chinese, UiText::Threshold) => "触发阈值:",
+            (Language::Chinese, UiText::Threshold) => "触发阈值：",
             (Language::Chinese, UiText::Calibration) => "校准",
-            (Language::Chinese, UiText::FollowOn) => "跟随最新: 开",
-            (Language::Chinese, UiText::FollowOff) => "跟随最新: 关",
+            (Language::Chinese, UiText::FollowOn) => "跟随最新：开",
+            (Language::Chinese, UiText::FollowOff) => "跟随最新：关",
             (Language::Chinese, UiText::Ready) => "QNMDsol 演示 v0.1 就绪。",
             (Language::Chinese, UiText::LanguagePrompt) => "选择语言",
             (Language::Chinese, UiText::StartSubtitle) => "选择语言开始",
@@ -1815,7 +1961,7 @@ impl Language {
             (Language::Chinese, UiText::SpectrumPngLabel) => "频谱PNG:",
             (Language::Chinese, UiText::NoSpectrumYet) => "暂无频谱，开始采集后生成。",
             (Language::Chinese, UiText::RecordRelax) => "1. 录制静息 (3s)",
-            (Language::Chinese, UiText::RecordAction) => "2. 录制作动 (3s)",
+            (Language::Chinese, UiText::RecordAction) => "2. 录制动作 (3s)",
             (Language::Chinese, UiText::ConnectStreamFirst) => "请先连接并开始采集。",
             (Language::Chinese, UiText::Loading) => "处理中...",
             (Language::Chinese, UiText::Sensitivity) => "敏感度",
@@ -1835,7 +1981,7 @@ impl Language {
             (Language::Chinese, UiText::ImpedanceNoData) => "暂无阻抗结果。",
             (Language::Chinese, UiText::ImpedanceUpdated) => "阻抗结果已更新。",
             (Language::Chinese, UiText::ImpedanceChannelHeader) => "通道",
-            (Language::Chinese, UiText::ImpedanceValueHeader) => "阻抗 (kΩ)",
+            (Language::Chinese, UiText::ImpedanceValueHeader) => "阻抗 (kOhm)",
             (Language::Chinese, UiText::PortLabel) => "串口:",
             (Language::Chinese, UiText::RefreshPorts) => "刷新",
             (Language::Chinese, UiText::PortsScanned) => "已扫描串口:",
@@ -1856,8 +2002,17 @@ impl Language {
             (Language::Chinese, UiText::ShowPanel) => "展开面板",
             (Language::Chinese, UiText::HidePanel) => "收起面板",
             (Language::Chinese, UiText::ImpedanceLegend) => {
-                "🟢 <500k 理想 | 🟡 0.5-2.5M 可用 | 🔴 >2.5M 不良 | Railed=未接触"
+                "良好 <500k | 可用 0.5-2.5M | 较差 >2.5M | Railed = 无接触"
             }
+            (Language::Chinese, UiText::ModelSection) => "AI 模型",
+            (Language::Chinese, UiText::ModelPath) => "路径",
+            (Language::Chinese, UiText::ModelReload) => "加载 / 重载",
+            (Language::Chinese, UiText::ModelLoaded) => "模型",
+            (Language::Chinese, UiText::ModelNone) => "未加载模型。",
+            (Language::Chinese, UiText::ModelError) => "模型错误",
+            (Language::Chinese, UiText::ModelClasses) => "类别",
+            (Language::Chinese, UiText::ModelChannels) => "通道数",
+            (Language::Chinese, UiText::ModelOutput) => "模型输出",
         }
     }
     fn default_record_label(&self) -> &'static str {
@@ -1941,6 +2096,15 @@ enum UiText {
     ShowPanel,
     HidePanel,
     ImpedanceLegend,
+    ModelSection,
+    ModelPath,
+    ModelReload,
+    ModelLoaded,
+    ModelNone,
+    ModelError,
+    ModelClasses,
+    ModelChannels,
+    ModelOutput,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewTab {

@@ -5,6 +5,7 @@ mod drivers;
 mod engine;
 mod gui;
 mod openbci;
+mod brain_utils;
 mod recorder;
 mod types;
 mod visualizer;
