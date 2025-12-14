@@ -45,7 +45,9 @@ The project follows a modular MVC-like structure:
 ### Software
 1.  **Windows 10 / 11** (64-bit)
 2.  **Rust Toolchain** (Latest Stable)
-3.  **[vJoy Driver](https://github.com/shauleiz/vJoy)** (Must be installed and configured)
+3.  **vJoy Driver v2.2.2.0** (Must be installed and configured)
+    * Download: https://github.com/BrunnerInnovation/vJoy/releases/tag/v2.2.2.0
+    * Configure `Device 1` via `vJoyConf.exe` (see `使用说明.md` for step-by-step).
 4.  **BrainFlow Dynamic Libraries**:
     * `BoardController.dll`
     * `DataHandler.dll`
@@ -57,13 +59,15 @@ The project follows a modular MVC-like structure:
 ## 🚀 Quick Start
 
 ### 1. Setup
-Clone the repository and ensure all DLLs are in the root folder.
+Clone the repository and ensure required DLLs are in the root folder (or next to the built `.exe`).
 
 ```bash
 git clone [https://github.com/YourUsername/QNMDsol.git](https://github.com/YourUsername/QNMDsol.git)
 cd QNMDsol
 # Copy BoardController.dll, DataHandler.dll, vJoyInterface.dll here!
 ```
+
+**Note:** This repository already includes `BoardController.dll`, `DataHandler.dll`, and `vJoyInterface.dll` for Windows x64 in the project root. If you removed them, see `使用说明.md` for restore instructions.
 
 ### 2. Run Simulation (No Hardware Required)
 Test the logic and game mapping immediately using the built-in simulator.
@@ -92,12 +96,12 @@ Modern games like Elden Ring only recognize the Xbox (XInput) standard controlle
 2.  **Generic Support:** Go to Steam -> **Settings** -> **Controller** -> Check **"Enable Generic Gamepad Configuration Support"**.
 3.  **Enable Steam Input:** In the Steam Library, right-click Elden Ring -> **Properties** -> **Controller** -> Select **"Enable Steam Input"**.
 4.  **Button Mapping:** Click **"Controller Layout"**. You must manually map the signals output by QNMDsol (e.g., **Button 1**, **Axis X/Y**) to the corresponding standard **Xbox 360 Buttons** (e.g., A button, Left Stick).
-    * **💡 Tip:** To find the correct binding, run QNMDsol in **SIM mode** first, press the keyboard keys (`W/A/S/D`), and observe which axis is moving in the Steam mapping interface.
+    * **Tip:** Steam detects the **vJoy device input**, not your keyboard. SIM keyboard shortcuts only work when the QNMDsol window is focused. For mapping, prefer REAL mode (EEG drives vJoy in the background) or use `joy.cpl` to confirm axes/buttons first.
 
 After completing these steps, the game will be able to recognize your mind-controlled gamepad.
     
 ### 3. Run Hardware Mode
-Plug in the OpenBCI Dongle (Default: COM4).
+Plug in the OpenBCI Dongle (COM port is selectable in the UI).
 
 Turn on the Cyton Board.
 
