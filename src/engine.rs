@@ -296,6 +296,72 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                 }
             }
 
+            // Steam mapping helper: drive vJoy directly (no focus / no streaming dependency)
+            if mapping_helper != MappingHelperCommand::Off {
+                let now = Instant::now();
+                let mut gp = GamepadState::default();
+
+                if mapping_helper == MappingHelperCommand::AutoCycle {
+                    if mapping_helper_last_step.elapsed() >= Duration::from_millis(650) {
+                        mapping_helper_step = (mapping_helper_step + 1) % 8;
+                        mapping_helper_last_step = now;
+                    }
+                    match mapping_helper_step {
+                        0 => gp.a = true,
+                        1 => gp.b = true,
+                        2 => gp.x = true,
+                        3 => gp.y = true,
+                        4 => gp.ly = 1.0,
+                        5 => gp.ly = -1.0,
+                        6 => gp.lx = -1.0,
+                        _ => gp.lx = 1.0,
+                    }
+                } else if now <= mapping_helper_until {
+                    match mapping_helper {
+                        MappingHelperCommand::PulseA => gp.a = true,
+                        MappingHelperCommand::PulseB => gp.b = true,
+                        MappingHelperCommand::PulseX => gp.x = true,
+                        MappingHelperCommand::PulseY => gp.y = true,
+                        MappingHelperCommand::PulseDpadUp => gp.dpad_up = true,
+                        MappingHelperCommand::PulseDpadDown => gp.dpad_down = true,
+                        MappingHelperCommand::PulseDpadLeft => gp.dpad_left = true,
+                        MappingHelperCommand::PulseDpadRight => gp.dpad_right = true,
+                        MappingHelperCommand::PulseLeftStickUp => gp.ly = 1.0,
+                        MappingHelperCommand::PulseLeftStickDown => gp.ly = -1.0,
+                        MappingHelperCommand::PulseLeftStickLeft => gp.lx = -1.0,
+                        MappingHelperCommand::PulseLeftStickRight => gp.lx = 1.0,
+                        MappingHelperCommand::AutoCycle | MappingHelperCommand::Off => {}
+                    }
+                }
+
+                if let Some(joy) = &mut joystick {
+                    joy.set_button(1, gp.a);
+                    joy.set_button(2, gp.b);
+                    joy.set_button(3, gp.x);
+                    joy.set_button(4, gp.y);
+                    joy.set_button(9, gp.dpad_up);
+                    joy.set_button(10, gp.dpad_down);
+                    joy.set_button(11, gp.dpad_left);
+                    joy.set_button(12, gp.dpad_right);
+                    let axis = |v: f32| -> i32 {
+                        let v = v.clamp(-1.0, 1.0) as f64;
+                        (16384.0 + v * 16000.0) as i32
+                    };
+                    joy.set_axis(0x30, axis(gp.lx));
+                    joy.set_axis(0x31, axis(gp.ly));
+                }
+
+                if last_vjoy_update.elapsed().as_millis() > 30 {
+                    tx.send(BciMessage::GamepadUpdate(gp)).ok();
+                    last_vjoy_update = Instant::now();
+                }
+
+                // Keep a light tick so Steam sees changes even if streaming is stopped.
+                if !is_streaming {
+                    thread::sleep(Duration::from_millis(16));
+                }
+            }
+
             // 2. 数据采集与处理
             if is_streaming {
                 let mut has_new_data = false;
