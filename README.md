@@ -1,144 +1,58 @@
-# 🧠 QNMDsol
-### Quick Neural Mind-Driven Souls-like Controller
+# QNMDsol
+Quick Neural Mind-Driven Souls-like Controller
 
 ![Rust](https://img.shields.io/badge/Built_with-Rust-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows-blue?style=flat-square)
 ![Hardware](https://img.shields.io/badge/Hardware-OpenBCI-purple?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
-**QNMDsol** is a high-performance Brain-Computer Interface (BCI) game control system built with **Rust**. It is designed to control demanding "Souls-like" action games (e.g., *Elden Ring*, *Code Vein*) using real-time EEG/EMG signals.
+QNMDsol is a Rust app that reads EEG data from **OpenBCI Cyton + Daisy (16ch)** (via BrainFlow) and outputs a **vJoy virtual gamepad** for game control. The UI also provides waveform/spectrum visualization, impedance estimation, and CSV recording.
 
-By interfacing with **OpenBCI** hardware and mapping biological signals to a **vJoy** virtual gamepad, QNMDsol allows players to attack, move, and interact with the game world using their mind and facial muscle signals.
+- English setup: `USAGE.md`
+- 中文说明: `使用说明.md`
 
----
+## What This Repo Supports (current `main`)
+- **SIM mode**: keyboard → vJoy (for testing). Keyboard only works when QNMDsol is focused.
+- **REAL mode**: Cyton+Daisy (BrainFlow) → simple threshold demo → vJoy output.
+- **Waveform/Spectrum**: basic real-time visualization.
+- **Calibration tab**: “Record Relax (3s)” + “Record Action (3s)” computes a demo threshold.
+- **Impedance tab**: estimates impedance (rough quality check).
+- **Recording**: saves EEG to CSV for offline training (`trainer/`).
+- **AI Model UI**: can load `brain_model.json` and display placeholder outputs; real-time inference is not wired into `engine` yet.
 
-## ✨ Features
-
-* **🚀 Blazing Fast Core:** Powered by Rust's multi-threaded architecture, separating data acquisition, signal processing, and UI rendering for sub-millisecond latency.
-* **🎮 Virtual Gamepad Integration:** Fully simulates an Xbox 360 controller via **vJoy**, supporting dual analog sticks, triggers, and ABXY buttons.
-* **📈 Real-time Visualization:** A cyberpunk-styled GUI based on `egui`, offering 60FPS waveform rendering and visual controller feedback.
-* **🧪 Dual Operation Modes:**
-    * **Simulation Mode:** Built-in software signal generator. Use your keyboard to simulate brainwaves and test game mappings without hardware.
-    * **Hardware Mode:** Direct connection to OpenBCI Cyton + Daisy (16-channel) via USB Dongle.
-* **💾 AI-Ready Data Collection:** Integrated recorder to save raw 16-channel EEG data to CSV for training CSP/LDA or Deep Learning models.
-
----
-
-## 🛠️ Architecture
-
-The project follows a modular MVC-like structure:
-
-* `src/main.rs`: Entry point and application lifecycle management.
-* `src/engine.rs`: **The Brain**. Handles BrainFlow driver interaction, signal processing logic, and threshold detection.
-* `src/gui.rs`: **The View**. Handles the egui interface, waveform plotting, and user interaction.
-* `src/vjoy.rs`: **The Hand**. Wraps the Windows vJoy C interface for virtual controller output.
-* `src/recorder.rs`: **The Memory**. Handles data logging to CSV files.
-
----
-
-## ⚙️ Prerequisites
-
+## Requirements (Windows)
 ### Hardware
-* **OpenBCI Cyton + Daisy Board** (16 Channels)
-* OpenBCI Programmable USB Dongle
+- OpenBCI Cyton + Daisy (16 channels) + USB dongle
 
 ### Software
-1.  **Windows 10 / 11** (64-bit)
-2.  **Rust Toolchain** (Latest Stable)
-3.  **vJoy Driver v2.2.2.0** (Must be installed and configured)
-    * Download: https://github.com/BrunnerInnovation/vJoy/releases/tag/v2.2.2.0
-    * Configure `Device 1` via `vJoyConf.exe` (see `使用说明.md` for step-by-step).
-4.  **BrainFlow Dynamic Libraries**:
-    * `BoardController.dll`
-    * `DataHandler.dll`
-    * `vJoyInterface.dll`
-    * *(Place these in the project root directory)*
+1. Windows 10/11 (64-bit)
+2. Rust stable (install: https://rustup.rs)
+3. vJoy **v2.2.2.0** (required): https://github.com/BrunnerInnovation/vJoy/releases/tag/v2.2.2.0
+4. Runtime DLLs (required; must be in working directory / next to `.exe`):
+   - `BoardController.dll` (BrainFlow)
+   - `DataHandler.dll` (BrainFlow)
+   - `vJoyInterface.dll` (vJoy SDK)
 
----
+This repository includes these DLLs in the repo root for Windows x64. If you removed them, see `USAGE.md` / `使用说明.md`.
 
-## 🚀 Quick Start
-
-### 1. Setup
-Clone the repository and ensure required DLLs are in the root folder (or next to the built `.exe`).
-
+## Quick Start
 ```bash
-git clone [https://github.com/YourUsername/QNMDsol.git](https://github.com/YourUsername/QNMDsol.git)
+git clone https://github.com/Skiyoshika/QNMDsol.git
 cd QNMDsol
-# Copy BoardController.dll, DataHandler.dll, vJoyInterface.dll here!
-```
-
-**Note:** This repository already includes `BoardController.dll`, `DataHandler.dll`, and `vJoyInterface.dll` for Windows x64 in the project root. If you removed them, see `使用说明.md` for restore instructions.
-
-### 2. Run Simulation (No Hardware Required)
-Test the logic and game mapping immediately using the built-in simulator.
-
-```bash
 cargo run
 ```
 
-1.  Select **SIM** mode in the top-left corner.
-2.  Click **CONNECT** -> **START STREAM**.
-3.  Use your **Keyboard** to simulate brain signals:
-    * **W / A / S / D**: Left Stick (Movement)
-    * **I / J / K / L**: Right Stick (Camera)
-    * **Space**: Button A (Jump/Confirm)
-    * **Z / X / C**: Buttons B / X / Y
+## Steam Input (XInput translation)
+Most modern games only recognize Xbox controllers (XInput). vJoy is a DirectInput device, so you usually need Steam Input to translate:
+1. Steam → Settings → Controller → enable “Generic Gamepad Configuration Support”
+2. Game → Properties → Controller → enable “Steam Input”
+3. Game → “Controller Layout” → bind vJoy axes/buttons to Xbox controls
 
-### **2.1 🔴 【CRITICAL】Game Recognition Setup (XInput Translation)**
-
-Modern games like Elden Ring only recognize the Xbox (XInput) standard controller, while QNMDsol simulates a generic controller (DirectInput). Therefore, a "translator" is required to bridge this gap.
-
-**We strongly recommend using Steam's built-in "Steam Input" feature for this conversion. It is the cleanest and most stable solution as it requires no file injection.**
-
-#### **Steam Input One-Time Setup Process:**
-
-1.  **Preparation:** Launch Steam and ensure Elden Ring is in your Steam library (add it as a non-Steam game if necessary).
-2.  **Generic Support:** Go to Steam -> **Settings** -> **Controller** -> Check **"Enable Generic Gamepad Configuration Support"**.
-3.  **Enable Steam Input:** In the Steam Library, right-click Elden Ring -> **Properties** -> **Controller** -> Select **"Enable Steam Input"**.
-4.  **Button Mapping:** Click **"Controller Layout"**. You must manually map the signals output by QNMDsol (e.g., **Button 1**, **Axis X/Y**) to the corresponding standard **Xbox 360 Buttons** (e.g., A button, Left Stick).
-    * **Tip:** Steam detects the **vJoy device input**, not your keyboard. SIM keyboard shortcuts only work when the QNMDsol window is focused. For mapping, prefer REAL mode (EEG drives vJoy in the background) or use `joy.cpl` to confirm axes/buttons first.
-
-After completing these steps, the game will be able to recognize your mind-controlled gamepad.
-    
-### 3. Run Hardware Mode
-Plug in the OpenBCI Dongle (COM port is selectable in the UI).
-
-Turn on the Cyton Board.
-
-Select REAL mode in the GUI.
-
-Click CONNECT. Once connected, click START STREAM.
-
-Data Recording: Enter a label (e.g., "Attack") and click 🔴 RECORD to save training data.
-
----
-
-## 🗺️ Roadmap
-[x] v0.1 Demo: Core architecture, Simulation, vJoy integration, Data recording.
-
-[ ] v0.2 AI Integration: Integrate ONNX Runtime to load Python-trained CSP+LDA models.
-
-[ ] v0.3 Macro System: automated macros for complex in-game actions (e.g., healing, dodging).
-
-[ ] v1.0 Release: Closed-loop bidirectional VR sensory modulation integration.
-
----
-
-## ⚠️ Disclaimer
-This project is in early Alpha.
-
-Do not use BCI devices while operating heavy machinery.
-
-The developer is not responsible for emotional damage caused by in-game deaths ("YOU DIED").
-
----
-
-## 📄 License
-MIT License
-
-Made with ❤️ and 🧠 by Independent Developer.
+Tip: Steam listens to **vJoy device input**, not your keyboard. SIM keyboard shortcuts only work while QNMDsol is focused. Use `joy.cpl` or REAL mode for reliable mapping.
 
 ## AI Pipeline (demo/offline)
-- Run 	rainer\run_all.bat to convert PhysioNet EEGMI (R07-10) and train CSP+LDA, output rain_model.json in project root.
-- GUI left panel supports setting model path and Load/Reload; right status panel shows per-class probabilities (random stub when no real inference).
-- Classes map to: left/right/fists/feet (demo用途)，真实指令需用你自己的帽子重新采集/重训。
+- Offline scripts live under `trainer/`.
+- `trainer/run_all.bat` produces a demo `brain_model.json` in the project root.
+
+## License
+MIT License (see `LICENSE`).
