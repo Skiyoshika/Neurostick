@@ -105,6 +105,7 @@ pub struct QnmdSolApp {
     model_status: Option<BrainModelStatus>,
     model_error: Option<String>,
     model_scores: Option<Vec<f32>>,
+    mapping_helper_auto: bool,
 }
 impl Default for QnmdSolApp {
     fn default() -> Self {
@@ -189,6 +190,7 @@ impl Default for QnmdSolApp {
             model_status: None,
             model_error: None,
             model_scores: None,
+            mapping_helper_auto: false,
         };
         app.autoload_model();
         app
@@ -1685,6 +1687,99 @@ impl eframe::App for QnmdSolApp {
                                 if ui.button(self.text(UiText::InjectArtifact)).clicked() {
                                     self.tx_cmd.send(GuiCommand::InjectArtifact).ok();
                                 }
+                                ui.separator();
+                                ui.label("Steam 映射助手 / Steam Mapping Helper");
+                                ui.label(
+                                    egui::RichText::new("AutoCycle 后可切到 Steam 窗口绑定（无需键盘焦点）")
+                                        .small()
+                                        .color(if self.theme_dark {
+                                            Color32::YELLOW
+                                        } else {
+                                            Color32::from_rgb(20, 60, 180)
+                                        }),
+                                );
+                                let auto_label = if self.mapping_helper_auto {
+                                    "Stop AutoCycle"
+                                } else {
+                                    "Start AutoCycle"
+                                };
+                                if ui.button(auto_label).clicked() {
+                                    self.mapping_helper_auto = !self.mapping_helper_auto;
+                                    let cmd = if self.mapping_helper_auto {
+                                        MappingHelperCommand::AutoCycle
+                                    } else {
+                                        MappingHelperCommand::Off
+                                    };
+                                    self.tx_cmd.send(GuiCommand::SetMappingHelper(cmd)).ok();
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("Pulse A").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseA,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Pulse B").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseB,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Pulse X").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseX,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Pulse Y").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseY,
+                                            ))
+                                            .ok();
+                                    }
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("LS Up").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickUp,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("LS Down").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickDown,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("LS Left").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickLeft,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("LS Right").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickRight,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Stop").clicked() {
+                                        self.mapping_helper_auto = false;
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::Off,
+                                            ))
+                                            .ok();
+                                    }
+                                });
                                 ui.label(
                                     egui::RichText::new(self.text(UiText::KeyHint))
                                         .small()

@@ -18,6 +18,26 @@ pub enum GuiCommand {
     StartRecording(String),
     StopRecording,
     InjectArtifact,
+    /// Helper to generate vJoy input for Steam mapping without keyboard focus.
+    SetMappingHelper(MappingHelperCommand),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MappingHelperCommand {
+    Off,
+    PulseA,
+    PulseB,
+    PulseX,
+    PulseY,
+    PulseDpadUp,
+    PulseDpadDown,
+    PulseDpadLeft,
+    PulseDpadRight,
+    PulseLeftStickUp,
+    PulseLeftStickDown,
+    PulseLeftStickLeft,
+    PulseLeftStickRight,
+    AutoCycle,
 }
 #[derive(Clone, Debug)]
 pub enum BciMessage {

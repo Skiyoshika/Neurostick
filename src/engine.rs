@@ -212,7 +212,6 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
         let mut recorder = DataRecorder::new();
         let mut openbci: Option<OpenBciSession> = None;
         let mut signal_buffer: Option<SignalBuffer> = None;
-        let mut channel_labels: Vec<String> = Vec::new();
         
         // 默认采样率
         let mut current_sample_rate_hz: f32 = 250.0; 
@@ -227,6 +226,10 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
 
         let mut sim_phase: f64 = 0.0;
         let mut current_sim_input = SimInputIntent::default();
+        let mut mapping_helper: MappingHelperCommand = MappingHelperCommand::Off;
+        let mut mapping_helper_until = Instant::now();
+        let mut mapping_helper_step: usize = 0;
+        let mut mapping_helper_last_step = Instant::now();
         let mut calib_mode = false;
         let mut calib_max_val = 0.0;
         let mut calib_start_time = Instant::now();
@@ -283,6 +286,12 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     GuiCommand::UpdateSimInput(input) => current_sim_input = input,
                     GuiCommand::StartRecording(l) => { recorder.start(&l); tx.send(BciMessage::RecordingStatus(true)).ok(); }
                     GuiCommand::StopRecording => { recorder.stop(); tx.send(BciMessage::RecordingStatus(false)).ok(); }
+                    GuiCommand::SetMappingHelper(cmd) => {
+                        mapping_helper = cmd;
+                        mapping_helper_until = Instant::now() + Duration::from_millis(600);
+                        mapping_helper_step = 0;
+                        mapping_helper_last_step = Instant::now();
+                    }
                     _ => {}
                 }
             }
@@ -299,7 +308,56 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     raw_channel_data.fill(0.0);
                     // ... (此处省略太长的模拟输入判定，保持原样即可，重点是后面)
                     // 为了演示简单，这里只保留一部分模拟逻辑
-                    if current_sim_input.w { raw_channel_data[0] += 500.0; }
+                    // Steam mapping helper (works even when Steam window is focused).
+                    // SIM keyboard shortcuts require QNMDsol focus; this helper generates vJoy inputs in the background.
+                    let mut sim = current_sim_input;
+                    if mapping_helper == MappingHelperCommand::AutoCycle {
+                        if mapping_helper_last_step.elapsed() >= Duration::from_millis(650) {
+                            mapping_helper_step = (mapping_helper_step + 1) % 8;
+                            mapping_helper_last_step = Instant::now();
+                        }
+                        sim = SimInputIntent::default();
+                        match mapping_helper_step {
+                            0 => sim.space = true, // A
+                            1 => sim.key_z = true, // B
+                            2 => sim.key_x = true, // X
+                            3 => sim.key_c = true, // Y
+                            4 => sim.w = true,     // LS up
+                            5 => sim.s = true,     // LS down
+                            6 => sim.a = true,     // LS left
+                            _ => sim.d = true,     // LS right
+                        }
+                    } else if mapping_helper != MappingHelperCommand::Off
+                        && Instant::now() <= mapping_helper_until
+                    {
+                        sim = SimInputIntent::default();
+                        match mapping_helper {
+                            MappingHelperCommand::PulseA => sim.space = true,
+                            MappingHelperCommand::PulseB => sim.key_z = true,
+                            MappingHelperCommand::PulseX => sim.key_x = true,
+                            MappingHelperCommand::PulseY => sim.key_c = true,
+                            MappingHelperCommand::PulseLeftStickUp => sim.w = true,
+                            MappingHelperCommand::PulseLeftStickDown => sim.s = true,
+                            MappingHelperCommand::PulseLeftStickLeft => sim.a = true,
+                            MappingHelperCommand::PulseLeftStickRight => sim.d = true,
+                            _ => {}
+                        }
+                    }
+
+                    // Simulation input -> channel activation patterns expected by process_neural_intent.
+                    let mut bump = |idx: usize| {
+                        if let Some(v) = raw_channel_data.get_mut(idx) {
+                            *v += 500.0;
+                        }
+                    };
+                    if sim.w { for &i in &[0, 4, 8] { bump(i); } }
+                    if sim.s { for &i in &[1, 5, 9] { bump(i); } }
+                    if sim.a { for &i in &[2, 6, 10] { bump(i); } }
+                    if sim.d { for &i in &[3, 7, 11] { bump(i); } }
+                    if sim.space { for &i in &[0, 1, 2] { bump(i); } } // A
+                    if sim.key_z { for &i in &[3, 4, 5] { bump(i); } } // B
+                    if sim.key_x { for &i in &[6, 7, 8] { bump(i); } } // X
+                    if sim.key_c { for &i in &[9, 10, 11] { bump(i); } } // Y
                     
                     // 模拟模式也加上一点随机漂移，测试滤波器
                     for v in raw_channel_data.iter_mut() { *v += noise; }
