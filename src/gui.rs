@@ -105,6 +105,7 @@ pub struct QnmdSolApp {
     model_status: Option<BrainModelStatus>,
     model_error: Option<String>,
     model_scores: Option<Vec<f32>>,
+    mapping_helper_auto: bool,
 }
 impl Default for QnmdSolApp {
     fn default() -> Self {
@@ -189,6 +190,7 @@ impl Default for QnmdSolApp {
             model_status: None,
             model_error: None,
             model_scores: None,
+            mapping_helper_auto: false,
         };
         app.autoload_model();
         app
@@ -999,11 +1001,8 @@ impl QnmdSolApp {
             if self.is_calibrating {
                 ui.label(self.text(UiText::Recording));
             }
-            ui.label(format!(
-                "{} {:.1}",
-                self.text(UiText::Threshold),
-                self.trigger_threshold
-            ));
+            ui.label(format!("Rest µ-power: {:.3}", self.calib_rest_max));
+            ui.label(format!("Imagery µ-power: {:.3}", self.calib_act_max));
         } else {
             ui.label(self.text(UiText::ConnectStreamFirst));
         }
@@ -1300,7 +1299,7 @@ impl eframe::App for QnmdSolApp {
         let mut msg_count = 0;
         while let Ok(msg) = self.rx.try_recv() {
             msg_count += 1;
-            if msg_count > 20 {
+            if msg_count > 2000 {
                 match msg {
                     BciMessage::GamepadUpdate(gp) => {
                         self.gamepad_target = gp;
@@ -1402,25 +1401,18 @@ impl eframe::App for QnmdSolApp {
                         if self.calib_rest_max == 0.0 {
                             self.calib_rest_max = max;
                             let msg = match self.language {
-                                Language::English => format!("Base: {:.1}", max),
+                                Language::English => format!("Rest µ-power: {:.3}", max),
                                 Language::Chinese => format!("基线：{:.1}", max),
                             };
                             self.log(&msg);
                         } else {
                             self.calib_act_max = max;
                             let msg = match self.language {
-                                Language::English => format!("Act: {:.1}", max),
+                                Language::English => format!("Imagery µ-power: {:.3}", max),
                                 Language::Chinese => format!("动作：{:.1}", max),
                             };
                             self.log(&msg);
-                            let new = (self.calib_rest_max + self.calib_act_max) * 0.6;
-                            self.trigger_threshold = new;
-                            self.tx_cmd.send(GuiCommand::SetThreshold(new)).unwrap();
-                            let thresh_msg = match self.language {
-                                Language::English => format!("Threshold: {:.1}", new),
-                                Language::Chinese => format!("阈值：{:.1}", new),
-                            };
-                            self.log(&thresh_msg);
+                            // Hardware mode now uses pure EEG µ-band power mapping for forward axis.
                         }
                     }
                 }
@@ -1685,6 +1677,99 @@ impl eframe::App for QnmdSolApp {
                                 if ui.button(self.text(UiText::InjectArtifact)).clicked() {
                                     self.tx_cmd.send(GuiCommand::InjectArtifact).ok();
                                 }
+                                ui.separator();
+                                ui.label("Steam 映射助手 / Steam Mapping Helper");
+                                ui.label(
+                                    egui::RichText::new("AutoCycle 后可切到 Steam 窗口绑定（无需键盘焦点）")
+                                        .small()
+                                        .color(if self.theme_dark {
+                                            Color32::YELLOW
+                                        } else {
+                                            Color32::from_rgb(20, 60, 180)
+                                        }),
+                                );
+                                let auto_label = if self.mapping_helper_auto {
+                                    "Stop AutoCycle"
+                                } else {
+                                    "Start AutoCycle"
+                                };
+                                if ui.button(auto_label).clicked() {
+                                    self.mapping_helper_auto = !self.mapping_helper_auto;
+                                    let cmd = if self.mapping_helper_auto {
+                                        MappingHelperCommand::AutoCycle
+                                    } else {
+                                        MappingHelperCommand::Off
+                                    };
+                                    self.tx_cmd.send(GuiCommand::SetMappingHelper(cmd)).ok();
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("Pulse A").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseA,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Pulse B").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseB,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Pulse X").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseX,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Pulse Y").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseY,
+                                            ))
+                                            .ok();
+                                    }
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("LS Up").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickUp,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("LS Down").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickDown,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("LS Left").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickLeft,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("LS Right").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickRight,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Stop").clicked() {
+                                        self.mapping_helper_auto = false;
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::Off,
+                                            ))
+                                            .ok();
+                                    }
+                                });
                                 ui.label(
                                     egui::RichText::new(self.text(UiText::KeyHint))
                                         .small()
