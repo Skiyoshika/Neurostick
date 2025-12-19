@@ -894,6 +894,13 @@ impl QnmdSolApp {
                         let notch50_label = self.text(UiText::Notch50);
                         changed |= ui.checkbox(&mut self.wave_notch_50hz, notch50_label).changed();
 
+                        if ui.button("×").clicked() {
+                            self.wave_toolbar_open = false;
+                            ui.ctx().data_mut(|d| {
+                                d.remove::<egui::Rect>(egui::Id::new("wave_toolbar_window"));
+                            });
+                        }
+
                         ui.menu_button("▼", |ui| {
                             let mut local_changed = false;
                             ui.set_min_width(360.0);
@@ -2649,6 +2656,9 @@ impl eframe::App for QnmdSolApp {
 
         // Floating overlay for Steam binding (kept above Steam when topmost is enabled).
         self.show_mapping_overlay(ctx);
+        // If the user closed the helper viewport via the OS close button, reflect it in the main checkbox.
+        self.mapping_overlay_open = BINDING_OVERLAY_OPEN.load(Ordering::Relaxed);
+        self.mapping_overlay_topmost = BINDING_OVERLAY_TOPMOST.load(Ordering::Relaxed);
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
