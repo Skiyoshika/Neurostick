@@ -7,6 +7,7 @@ mod gui;
 mod openbci;
 mod brain_utils;
 mod recorder;
+mod model;
 mod types;
 mod visualizer;
 mod vjoy;

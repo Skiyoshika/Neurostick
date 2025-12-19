@@ -1,6 +1,7 @@
 # Rust 编译生成的文件 (巨大，绝对不要传)
 /target/
 **/target/
+/target_build/
 
 # Windows 编译产生的调试符号
 *.pdb
@@ -17,6 +18,16 @@ __pycache__/
 
 # 你录制的个人脑波数据 (隐私，且占空间)
 *.csv
+
+# Logs / local artifacts
+logs/
+*.log
+*.tmp
+*.tmp.txt
+
+# Model binaries (large, local)
+model/*.onnx
+model/*.bin
 
 # VS Code 配置 (可选)
 .vscode/

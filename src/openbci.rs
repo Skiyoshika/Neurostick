@@ -4,6 +4,7 @@ use once_cell::sync::OnceCell;
 use serde::Serialize;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int};
+use std::path::PathBuf;
 const BOARD_ID_CYTON_DAISY: c_int = 2; // matches python trainer script
 const PRESET_DEFAULT: c_int = 0;
 const STREAM_RINGBUF_PACKETS: c_int = 450_000;
@@ -51,6 +52,9 @@ impl BrainFlowInputParams {
 struct BrainFlowApi {
     #[allow(dead_code)]
     lib: Library,
+    set_log_level: Option<unsafe extern "C" fn(c_int) -> c_int>,
+    set_log_file: Option<unsafe extern "C" fn(*const c_char) -> c_int>,
+    get_error_msg: Option<unsafe extern "C" fn(c_int, *mut c_char, c_int) -> c_int>,
     prepare_session: unsafe extern "C" fn(c_int, *const c_char) -> c_int,
     start_stream: unsafe extern "C" fn(c_int, *const c_char, c_int, *const c_char) -> c_int,
     stop_stream: unsafe extern "C" fn(c_int, *const c_char) -> c_int,
@@ -74,7 +78,45 @@ impl BrainFlowApi {
             .context("BoardController.dll not found in working directory")?;
         // Safety: we assume BrainFlow C API signatures from the official package.
         unsafe {
+            let set_log_level = lib
+                .get(b"set_log_level_board_controller\0")
+                .ok()
+                .map(|s: libloading::Symbol<unsafe extern "C" fn(c_int) -> c_int>| *s);
+            let set_log_file = lib
+                .get(b"set_log_file_board_controller\0")
+                .ok()
+                .map(|s: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> c_int>| *s);
+            let get_error_msg = lib
+                .get(b"get_error_msg\0")
+                .ok()
+                .map(
+                    |s: libloading::Symbol<unsafe extern "C" fn(c_int, *mut c_char, c_int) -> c_int>| {
+                        *s
+                    },
+                );
+
+            // Reduce noisy BoardController logs in the terminal; write them to a file instead.
+            // Log levels (BrainFlow): 0=TRACE,1=DEBUG,2=INFO,3=WARN,4=ERROR,5=CRITICAL,6=OFF.
+            if let Some(f) = set_log_file {
+                let _ = std::fs::create_dir_all("logs");
+                let path: PathBuf = ["logs", "board_controller.log"].iter().collect();
+                // Ensure the file exists so it's easy to find even if BoardController doesn't write.
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path);
+                if let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) {
+                    let _ = f(path.as_ptr());
+                }
+            }
+            if let Some(f) = set_log_level {
+                let _ = f(3); // WARN (still quiet in terminal, but keeps warnings in file)
+            }
+
             Ok(Self {
+                set_log_level,
+                set_log_file,
+                get_error_msg,
                 prepare_session: *lib.get(b"prepare_session\0")?,
                 start_stream: *lib.get(b"start_stream\0")?,
                 stop_stream: *lib.get(b"stop_stream\0")?,
@@ -91,21 +133,36 @@ impl BrainFlowApi {
         static API: OnceCell<BrainFlowApi> = OnceCell::new();
         API.get_or_try_init(Self::load)
     }
-    fn check(code: c_int, ctx: &str) -> Result<()> {
+    fn error_text(&self, code: c_int) -> Option<String> {
+        let f = self.get_error_msg?;
+        let mut buf = vec![0u8; 512];
+        let rc = unsafe { f(code, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+        if rc != 0 {
+            return None;
+        }
+        let nul = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+        Some(String::from_utf8_lossy(&buf[..nul]).trim().to_string())
+    }
+    fn check(&self, code: c_int, ctx: &str) -> Result<()> {
         if code == 0 {
             Ok(())
         } else {
-            Err(anyhow!("{ctx} failed (BrainFlow code {code})"))
+            let extra = self.error_text(code).unwrap_or_default();
+            if extra.is_empty() {
+                Err(anyhow!("{ctx} failed (BrainFlow code {code})"))
+            } else {
+                Err(anyhow!("{ctx} failed (BrainFlow code {code}): {extra}"))
+            }
         }
     }
     fn prepare(&self, board_id: c_int, input: &CString) -> Result<()> {
-        Self::check(
+        self.check(
             unsafe { (self.prepare_session)(board_id, input.as_ptr()) },
             "prepare_session",
         )
     }
     fn start_stream(&self, board_id: c_int, input: &CString) -> Result<()> {
-        Self::check(
+        self.check(
             unsafe {
                 (self.start_stream)(
                     STREAM_RINGBUF_PACKETS,
@@ -118,20 +175,20 @@ impl BrainFlowApi {
         )
     }
     fn stop_stream(&self, board_id: c_int, input: &CString) -> Result<()> {
-        Self::check(
+        self.check(
             unsafe { (self.stop_stream)(board_id, input.as_ptr()) },
             "stop_stream",
         )
     }
     fn release(&self, board_id: c_int, input: &CString) -> Result<()> {
-        Self::check(
+        self.check(
             unsafe { (self.release_session)(board_id, input.as_ptr()) },
             "release_session",
         )
     }
     fn sampling_rate(&self, board_id: c_int) -> Result<c_int> {
         let mut rate: c_int = 0;
-        Self::check(
+        self.check(
             unsafe { (self.get_sampling_rate)(board_id, PRESET_DEFAULT, &mut rate as *mut c_int) },
             "get_sampling_rate",
         )?;
@@ -139,7 +196,7 @@ impl BrainFlowApi {
     }
     fn num_rows(&self, board_id: c_int) -> Result<c_int> {
         let mut rows: c_int = 0;
-        Self::check(
+        self.check(
             unsafe { (self.get_num_rows)(board_id, PRESET_DEFAULT, &mut rows as *mut c_int) },
             "get_num_rows",
         )?;
@@ -148,7 +205,7 @@ impl BrainFlowApi {
     fn eeg_channels(&self, board_id: c_int, max_channels: usize) -> Result<Vec<c_int>> {
         let mut out_len: c_int = 0;
         let mut buf = vec![0 as c_int; max_channels.max(32)];
-        Self::check(
+        self.check(
             unsafe {
                 (self.get_eeg_channels)(
                     board_id,
@@ -171,7 +228,7 @@ impl BrainFlowApi {
         buffer: &mut [f64],
     ) -> Result<usize> {
         let mut current_size: c_int = 0;
-        Self::check(
+        self.check(
             unsafe {
                 (self.get_current_board_data)(
                     num_samples as c_int,
@@ -240,7 +297,13 @@ impl OpenBciSession {
     pub fn sample_rate_hz(&self) -> f32 {
         self.sample_rate_hz
     }
+    pub fn eeg_channel_count(&self) -> usize {
+        self.eeg_channels.len()
+    }
     pub fn start_stream(&mut self) -> Result<()> {
+        if self.released {
+            return Err(anyhow!("session already released; reconnect required"));
+        }
         if !self.is_streaming {
             self.api
                 .start_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
@@ -249,15 +312,27 @@ impl OpenBciSession {
         Ok(())
     }
     pub fn stop_stream(&mut self) -> Result<()> {
-        if !self.released {
-            if self.is_streaming {
-                self.api
-                    .stop_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
-                self.is_streaming = false;
-            }
-            self.api.release(BOARD_ID_CYTON_DAISY, &self.input_json)?;
-            self.released = true;
+        if self.released {
+            return Ok(());
         }
+        if self.is_streaming {
+            self.api
+                .stop_stream(BOARD_ID_CYTON_DAISY, &self.input_json)?;
+            self.is_streaming = false;
+        }
+        Ok(())
+    }
+
+    /// Releases the BrainFlow session. After calling this, the session cannot be started again.
+    pub fn release(&mut self) -> Result<()> {
+        if self.released {
+            return Ok(());
+        }
+        if self.is_streaming {
+            let _ = self.stop_stream();
+        }
+        self.api.release(BOARD_ID_CYTON_DAISY, &self.input_json)?;
+        self.released = true;
         Ok(())
     }
     /// Pulls the most recent sample for all EEG channels (if any).
@@ -280,7 +355,9 @@ impl OpenBciSession {
         for ch in &self.eeg_channels {
             let ch_idx = *ch as usize;
             if ch_idx < self.num_rows {
-                let offset = ch_idx * available + last_idx;
+                // BrainFlow writes a (num_rows x num_samples_requested) row-major matrix into `buf`.
+                // Only the first `available` columns are valid, but the row stride remains `max_samples`.
+                let offset = ch_idx * max_samples + last_idx;
                 if offset < buf.len() {
                     sample.push(buf[offset]);
                 }
@@ -296,5 +373,6 @@ impl OpenBciSession {
 impl Drop for OpenBciSession {
     fn drop(&mut self) {
         let _ = self.stop_stream();
+        let _ = self.release();
     }
 }

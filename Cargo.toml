@@ -27,6 +27,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 once_cell = "1.19"
 
+# --- ONNX Runtime (NeuroGPT 推理) ---
+ort = { version = "2.0.0-rc.9", features = ["ndarray", "load-dynamic"] }
+
 # --- 图形界面 (QNMDsol 主界面 ---
 eframe = "0.24"
 egui_plot = "0.24"
@@ -40,3 +43,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 # --- Windows API ---
 winapi = { version = "0.3.9", features = ["winuser", "windef"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

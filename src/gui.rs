@@ -15,27 +15,19 @@ use crate::waveform::{
 use eframe::egui;
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions, Vec2};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints, Text};
-use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::{fs, io::Write, path::PathBuf, time::Instant, time::SystemTime};
 // 引入串口库
 use serialport;
 
-#[derive(Debug, Clone, Deserialize)]
-struct BrainModel {
-    version: Option<String>,
-    n_channels: usize,
-    csp_filters: Option<Vec<Vec<f64>>>,
-    lda_coef: Option<Vec<Vec<f64>>>,
-    lda_intercept: Option<Vec<f64>>,
-    classes: Vec<String>,
-}
+static BINDING_OVERLAY_OPEN: AtomicBool = AtomicBool::new(false);
+static BINDING_OVERLAY_TOPMOST: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone)]
-struct BrainModelStatus {
+struct OnnxModelStatus {
     path: String,
     loaded_at: SystemTime,
-    info: BrainModel,
 }
 
 pub struct QnmdSolApp {
@@ -83,6 +75,20 @@ pub struct QnmdSolApp {
     wave_window_seconds: f64,
     wave_auto_scale: bool,
     wave_notch_50hz: bool,
+    wave_highpass: bool,
+    wave_highpass_hz: f32,
+    wave_highpass_q: f32,
+    wave_lowpass: bool,
+    wave_lowpass_hz: f32,
+    wave_lowpass_q: f32,
+    wave_bandpass: bool,
+    wave_bandpass_low_hz: f32,
+    wave_bandpass_high_hz: f32,
+    wave_bandpass_q: f32,
+    wave_bandstop: bool,
+    wave_bandstop_low_hz: f32,
+    wave_bandstop_high_hz: f32,
+    wave_bandstop_q: f32,
     wave_fixed_range_uv: f32,
     wave_show_stats: bool,
     stream_start: Option<Instant>,
@@ -102,10 +108,16 @@ pub struct QnmdSolApp {
     control_panel_width: f32,
     // 模型状态
     model_path: String,
-    model_status: Option<BrainModelStatus>,
+    model_status: Option<OnnxModelStatus>,
     model_error: Option<String>,
     model_scores: Option<Vec<f32>>,
+    neurogpt_status: Option<NeuroGptRuntimeStatus>,
+    neurogpt_gate: NeuroGptGateParams,
+    neurogpt_last_trigger: Option<(usize, Instant)>,
+    neurogpt_calib_progress01: f32,
     mapping_helper_auto: bool,
+    mapping_overlay_open: bool,
+    mapping_overlay_topmost: bool,
 }
 impl Default for QnmdSolApp {
     fn default() -> Self {
@@ -167,7 +179,22 @@ impl Default for QnmdSolApp {
             wave_smooth_state: Vec::new(),
             wave_window_seconds: 30.0,
             wave_auto_scale: false,
-            wave_notch_50hz: false,
+            // Common EEG viewing preset: 1–40 Hz + 50 Hz notch (China mains).
+            wave_notch_50hz: true,
+            wave_highpass: true,
+            wave_highpass_hz: 1.0,
+            wave_highpass_q: 0.707,
+            wave_lowpass: true,
+            wave_lowpass_hz: 40.0,
+            wave_lowpass_q: 0.707,
+            wave_bandpass: false,
+            wave_bandpass_low_hz: 1.0,
+            wave_bandpass_high_hz: 40.0,
+            wave_bandpass_q: 0.707,
+            wave_bandstop: false,
+            wave_bandstop_low_hz: 48.0,
+            wave_bandstop_high_hz: 52.0,
+            wave_bandstop_q: 10.0,
             wave_fixed_range_uv: 200.0,
             wave_show_stats: true,
             stream_start: None,
@@ -186,17 +213,309 @@ impl Default for QnmdSolApp {
             selected_port: default_port,
             control_panel_open: true,
             control_panel_width: 320.0,
-            model_path: "brain_model.json".to_string(),
+            model_path: "model/neurogpt.onnx".to_string(),
             model_status: None,
             model_error: None,
             model_scores: None,
+            neurogpt_status: None,
+            neurogpt_gate: NeuroGptGateParams {
+                warmup: 30,
+                cooldown_ms: 400,
+                min_prob: 0.55,
+                k_sigma: 2.5,
+            },
+            neurogpt_last_trigger: None,
+            neurogpt_calib_progress01: 0.0,
             mapping_helper_auto: false,
+            mapping_overlay_open: false,
+            mapping_overlay_topmost: false,
         };
+        // Restore overlay window preferences from last run (in-process lifetime).
+        app.mapping_overlay_open = BINDING_OVERLAY_OPEN.load(Ordering::Relaxed);
+        app.mapping_overlay_topmost = BINDING_OVERLAY_TOPMOST.load(Ordering::Relaxed);
         app.autoload_model();
         app
     }
 }
 impl QnmdSolApp {
+    fn show_mapping_overlay(&mut self, ctx: &egui::Context) {
+        // Use a separate native window so Steam remains visible (draggable overlay).
+        let viewport_id = egui::ViewportId::from_hash_of("qnmdsol_binding_helper");
+
+        // Sync from last known global state (main UI will update this; child viewport can also close it).
+        // IMPORTANT: do NOT overwrite checkbox state mid-frame (otherwise the checkbox can't be toggled).
+
+        // Only show in Simulation mode; hide otherwise.
+        if self.connection_mode != ConnectionMode::Simulation {
+            BINDING_OVERLAY_OPEN.store(false, Ordering::Relaxed);
+            ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
+            return;
+        }
+        // Track current desired open state (set by main UI).
+        BINDING_OVERLAY_OPEN.store(self.mapping_overlay_open, Ordering::Relaxed);
+        if !self.mapping_overlay_open {
+            ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
+            return;
+        }
+
+        let title: String = if self.language == Language::Chinese {
+            "绑定助手".to_owned()
+        } else {
+            "Binding Helper".to_owned()
+        };
+        // Topmost is controlled via the helper window itself.
+        let topmost = BINDING_OVERLAY_TOPMOST.load(Ordering::Relaxed);
+        let lang = self.language;
+        let tx_cmd = self.tx_cmd.clone();
+
+        ctx.show_viewport_deferred(
+            viewport_id,
+            egui::ViewportBuilder::default()
+                .with_title(title.clone())
+                .with_inner_size([360.0, 460.0])
+                .with_resizable(true)
+                .with_window_level(if topmost {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                }),
+            move |ctx, _class| {
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    BINDING_OVERLAY_OPEN.store(false, Ordering::Relaxed);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+                // Mark as open while the window is alive.
+                BINDING_OVERLAY_OPEN.store(true, Ordering::Relaxed);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading(&title);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(if lang == Language::Chinese { "关闭" } else { "Close" }).clicked() {
+                                BINDING_OVERLAY_OPEN.store(false, Ordering::Relaxed);
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        });
+                    });
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        let mut topmost = BINDING_OVERLAY_TOPMOST.load(Ordering::Relaxed);
+                        if ui
+                            .checkbox(
+                                &mut topmost,
+                                if lang == Language::Chinese {
+                                    "窗口置顶"
+                                } else {
+                                    "Always on top"
+                                },
+                            )
+                            .changed()
+                        {
+                            BINDING_OVERLAY_TOPMOST.store(topmost, Ordering::Relaxed);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if topmost {
+                                egui::WindowLevel::AlwaysOnTop
+                            } else {
+                                egui::WindowLevel::Normal
+                            }));
+                        }
+                    });
+                    ui.label(if lang == Language::Chinese {
+                        "点按钮发送 vJoy 脉冲（用于 Steam 绑定）。这是独立窗口，可拖动到不遮挡的位置。"
+                    } else {
+                        "Click buttons to send vJoy pulses (for Steam binding). This is a separate window; drag it away from Steam UI."
+                    });
+
+                    let send = |cmd: MappingHelperCommand| {
+                        tx_cmd.send(GuiCommand::SetMappingHelper(cmd)).ok();
+                    };
+
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("A").clicked() { send(MappingHelperCommand::PulseA); }
+                        if ui.button("B").clicked() { send(MappingHelperCommand::PulseB); }
+                        if ui.button("X").clicked() { send(MappingHelperCommand::PulseX); }
+                        if ui.button("Y").clicked() { send(MappingHelperCommand::PulseY); }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("D←").clicked() { send(MappingHelperCommand::PulseDpadLeft); }
+                        if ui.button("D→").clicked() { send(MappingHelperCommand::PulseDpadRight); }
+                        if ui.button("D↑").clicked() { send(MappingHelperCommand::PulseDpadUp); }
+                        if ui.button("D↓").clicked() { send(MappingHelperCommand::PulseDpadDown); }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("LS←").clicked() { send(MappingHelperCommand::PulseLeftStickLeft); }
+                        if ui.button("LS→").clicked() { send(MappingHelperCommand::PulseLeftStickRight); }
+                        if ui.button("LS↑").clicked() { send(MappingHelperCommand::PulseLeftStickUp); }
+                        if ui.button("LS↓").clicked() { send(MappingHelperCommand::PulseLeftStickDown); }
+                        if ui.button("LS⭘").clicked() { send(MappingHelperCommand::PulseLeftStickClick); }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("RS←").clicked() { send(MappingHelperCommand::PulseRightStickLeft); }
+                        if ui.button("RS→").clicked() { send(MappingHelperCommand::PulseRightStickRight); }
+                        if ui.button("RS↑").clicked() { send(MappingHelperCommand::PulseRightStickUp); }
+                        if ui.button("RS↓").clicked() { send(MappingHelperCommand::PulseRightStickDown); }
+                        if ui.button("RS⭘").clicked() { send(MappingHelperCommand::PulseRightStickClick); }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("LB").clicked() { send(MappingHelperCommand::PulseLB); }
+                        if ui.button("RB").clicked() { send(MappingHelperCommand::PulseRB); }
+                        if ui.button("LT").clicked() { send(MappingHelperCommand::PulseLT); }
+                        if ui.button("RT").clicked() { send(MappingHelperCommand::PulseRT); }
+                        if ui.button("Back").clicked() { send(MappingHelperCommand::PulseBack); }
+                        if ui.button("Start").clicked() { send(MappingHelperCommand::PulseStart); }
+                    });
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button(if lang == Language::Chinese { "自动循环" } else { "AutoCycle" }).clicked() {
+                            send(MappingHelperCommand::AutoCycle);
+                        }
+                        if ui.button(if lang == Language::Chinese { "停止" } else { "Stop" }).clicked() {
+                            send(MappingHelperCommand::Off);
+                        }
+                    });
+                });
+            },
+        );
+
+        /*
+        // NOTE: The original in-window overlay UI is kept below for non-viewport backends.
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(320.0)
+            .default_pos([24.0, 24.0])
+            .open(&mut self.mapping_overlay_open)
+            .show(ctx, |ui| {
+                ui.label(if self.language == Language::Chinese {
+                    "点击按钮发送一次 vJoy 脉冲（用于 Steam 绑定）"
+                } else {
+                    "Click buttons to send a vJoy pulse (for Steam binding)"
+                });
+
+                let mut send = |cmd: MappingHelperCommand| {
+                    self.mapping_helper_auto = false;
+                    self.tx_cmd.send(GuiCommand::SetMappingHelper(cmd)).ok();
+                };
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("A").clicked() {
+                        send(MappingHelperCommand::PulseA);
+                    }
+                    if ui.button("B").clicked() {
+                        send(MappingHelperCommand::PulseB);
+                    }
+                    if ui.button("X").clicked() {
+                        send(MappingHelperCommand::PulseX);
+                    }
+                    if ui.button("Y").clicked() {
+                        send(MappingHelperCommand::PulseY);
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("D←").clicked() {
+                        send(MappingHelperCommand::PulseDpadLeft);
+                    }
+                    if ui.button("D→").clicked() {
+                        send(MappingHelperCommand::PulseDpadRight);
+                    }
+                    if ui.button("D↑").clicked() {
+                        send(MappingHelperCommand::PulseDpadUp);
+                    }
+                    if ui.button("D↓").clicked() {
+                        send(MappingHelperCommand::PulseDpadDown);
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("LS←").clicked() {
+                        send(MappingHelperCommand::PulseLeftStickLeft);
+                    }
+                    if ui.button("LS→").clicked() {
+                        send(MappingHelperCommand::PulseLeftStickRight);
+                    }
+                    if ui.button("LS↑").clicked() {
+                        send(MappingHelperCommand::PulseLeftStickUp);
+                    }
+                    if ui.button("LS↓").clicked() {
+                        send(MappingHelperCommand::PulseLeftStickDown);
+                    }
+                    if ui.button("LS⭘").clicked() {
+                        send(MappingHelperCommand::PulseLeftStickClick);
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("RS←").clicked() {
+                        send(MappingHelperCommand::PulseRightStickLeft);
+                    }
+                    if ui.button("RS→").clicked() {
+                        send(MappingHelperCommand::PulseRightStickRight);
+                    }
+                    if ui.button("RS↑").clicked() {
+                        send(MappingHelperCommand::PulseRightStickUp);
+                    }
+                    if ui.button("RS↓").clicked() {
+                        send(MappingHelperCommand::PulseRightStickDown);
+                    }
+                    if ui.button("RS⭘").clicked() {
+                        send(MappingHelperCommand::PulseRightStickClick);
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("LB").clicked() {
+                        send(MappingHelperCommand::PulseLB);
+                    }
+                    if ui.button("RB").clicked() {
+                        send(MappingHelperCommand::PulseRB);
+                    }
+                    if ui.button("LT").clicked() {
+                        send(MappingHelperCommand::PulseLT);
+                    }
+                    if ui.button("RT").clicked() {
+                        send(MappingHelperCommand::PulseRT);
+                    }
+                    if ui.button("Back").clicked() {
+                        send(MappingHelperCommand::PulseBack);
+                    }
+                    if ui.button("Start").clicked() {
+                        send(MappingHelperCommand::PulseStart);
+                    }
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(if self.language == Language::Chinese {
+                        "开始自动循环"
+                    } else {
+                        "AutoCycle"
+                    })
+                    .clicked()
+                    {
+                        self.mapping_helper_auto = true;
+                        self.tx_cmd
+                            .send(GuiCommand::SetMappingHelper(MappingHelperCommand::AutoCycle))
+                            .ok();
+                    }
+                    if ui.button(if self.language == Language::Chinese {
+                        "停止"
+                    } else {
+                        "Stop"
+                    })
+                    .clicked()
+                    {
+                        self.mapping_helper_auto = false;
+                        self.tx_cmd
+                            .send(GuiCommand::SetMappingHelper(MappingHelperCommand::Off))
+                            .ok();
+                    }
+                });
+            });
+        */
+    }
+
     fn impedance_status(value_ohms: f32, lang: Language) -> (Color32, &'static str) {
         let (c_good, c_ok, c_bad, c_railed) = (
             Color32::from_rgb(46, 204, 113),
@@ -334,19 +653,16 @@ impl QnmdSolApp {
             self.model_error = Some("Empty model path".to_string());
             return Err("Empty model path".to_string());
         }
-        let raw = fs::read_to_string(trimmed).map_err(|e| e.to_string())?;
-        let info: BrainModel = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        let status = BrainModelStatus {
+        if !PathBuf::from(trimmed).exists() {
+            self.model_status = None;
+            self.model_error = Some("Model file not found".to_string());
+            return Err("Model file not found".to_string());
+        }
+        let status = OnnxModelStatus {
             path: trimmed.to_string(),
             loaded_at: SystemTime::now(),
-            info,
         };
-        let msg = format!(
-            "Model loaded: {} ({} classes, {} channels)",
-            status.path,
-            status.info.classes.len(),
-            status.info.n_channels
-        );
+        let msg = format!("ONNX model found: {}", status.path);
         self.model_status = Some(status);
         self.model_error = None;
         self.model_scores = None;
@@ -371,9 +687,11 @@ impl QnmdSolApp {
         self.record_label = self.language.default_record_label().to_owned();
     }
     fn log(&mut self, msg: &str) {
+        const MAX_LOG_LINES: usize = 500;
         self.log_messages.push(format!("> {}", msg));
-        if self.log_messages.len() > 8 {
-            self.log_messages.remove(0);
+        if self.log_messages.len() > MAX_LOG_LINES {
+            let overflow = self.log_messages.len() - MAX_LOG_LINES;
+            self.log_messages.drain(0..overflow);
         }
     }
     fn lerp(current: f32, target: f32, speed: f32) -> f32 {
@@ -457,14 +775,39 @@ impl QnmdSolApp {
                 YScale::FixedMicrovolts(self.wave_fixed_range_uv.max(10.0))
             };
             pipe.set_global_y_scale(y_scale);
-            let filters = if self.wave_notch_50hz {
-                vec![FilterKind::Notch {
+            let mut filters: Vec<FilterKind> = Vec::new();
+            if self.wave_highpass {
+                filters.push(FilterKind::Highpass {
+                    cutoff_hz: self.wave_highpass_hz.max(0.01),
+                    q: self.wave_highpass_q.max(0.1),
+                });
+            }
+            if self.wave_lowpass {
+                filters.push(FilterKind::Lowpass {
+                    cutoff_hz: self.wave_lowpass_hz.max(0.01),
+                    q: self.wave_lowpass_q.max(0.1),
+                });
+            }
+            if self.wave_bandpass {
+                filters.push(FilterKind::Bandpass {
+                    low_hz: self.wave_bandpass_low_hz.max(0.01),
+                    high_hz: self.wave_bandpass_high_hz.max(0.01),
+                    q: self.wave_bandpass_q.max(0.1),
+                });
+            }
+            if self.wave_bandstop {
+                filters.push(FilterKind::Bandstop {
+                    low_hz: self.wave_bandstop_low_hz.max(0.01),
+                    high_hz: self.wave_bandstop_high_hz.max(0.01),
+                    q: self.wave_bandstop_q.max(0.1),
+                });
+            }
+            if self.wave_notch_50hz {
+                filters.push(FilterKind::Notch {
                     freq_hz: 50.0,
                     q: 35.0,
-                }]
-            } else {
-                Vec::new()
-            };
+                });
+            }
             for idx in 0..pipe.channel_count() {
                 pipe.set_channel_enabled(idx, true);
                 pipe.set_channel_filters(idx, filters.clone());
@@ -576,6 +919,112 @@ impl QnmdSolApp {
             changed |= resp.changed();
             changed |= ui
                 .checkbox(&mut self.wave_notch_50hz, notch_label)
+                .changed();
+
+            ui.separator();
+            let filters_label = self.text(UiText::Filters);
+            let hp_label = self.text(UiText::Highpass);
+            let lp_label = self.text(UiText::Lowpass);
+            let bp_label = self.text(UiText::Bandpass);
+            let bs_label = self.text(UiText::Bandstop);
+            let cutoff_label = self.text(UiText::CutoffHz);
+            let low_hz_label = self.text(UiText::LowHz);
+            let high_hz_label = self.text(UiText::HighHz);
+            ui.label(filters_label);
+            changed |= ui
+                .checkbox(&mut self.wave_highpass, hp_label)
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_highpass,
+                    egui::Slider::new(&mut self.wave_highpass_hz, 0.1..=30.0)
+                        .show_value(true)
+                        .text(cutoff_label),
+                )
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_highpass,
+                    egui::Slider::new(&mut self.wave_highpass_q, 0.1..=20.0)
+                        .show_value(true)
+                        .text("Q"),
+                )
+                .changed();
+
+            changed |= ui
+                .checkbox(&mut self.wave_lowpass, lp_label)
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_lowpass,
+                    egui::Slider::new(&mut self.wave_lowpass_hz, 1.0..=120.0)
+                        .show_value(true)
+                        .text(cutoff_label),
+                )
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_lowpass,
+                    egui::Slider::new(&mut self.wave_lowpass_q, 0.1..=20.0)
+                        .show_value(true)
+                        .text("Q"),
+                )
+                .changed();
+
+            changed |= ui
+                .checkbox(&mut self.wave_bandpass, bp_label)
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_bandpass,
+                    egui::Slider::new(&mut self.wave_bandpass_low_hz, 0.1..=80.0)
+                        .show_value(true)
+                        .text(low_hz_label),
+                )
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_bandpass,
+                    egui::Slider::new(&mut self.wave_bandpass_high_hz, 0.1..=120.0)
+                        .show_value(true)
+                        .text(high_hz_label),
+                )
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_bandpass,
+                    egui::Slider::new(&mut self.wave_bandpass_q, 0.1..=20.0)
+                        .show_value(true)
+                        .text("Q"),
+                )
+                .changed();
+
+            changed |= ui
+                .checkbox(&mut self.wave_bandstop, bs_label)
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_bandstop,
+                    egui::Slider::new(&mut self.wave_bandstop_low_hz, 0.1..=120.0)
+                        .show_value(true)
+                        .text(low_hz_label),
+                )
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_bandstop,
+                    egui::Slider::new(&mut self.wave_bandstop_high_hz, 0.1..=120.0)
+                        .show_value(true)
+                        .text(high_hz_label),
+                )
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    self.wave_bandstop,
+                    egui::Slider::new(&mut self.wave_bandstop_q, 0.1..=50.0)
+                        .show_value(true)
+                        .text("Q"),
+                )
                 .changed();
             changed |= ui
                 .checkbox(&mut self.wave_show_stats, stats_label)
@@ -806,6 +1255,7 @@ impl QnmdSolApp {
                     .selectable_value(&mut self.fft_size, *sz, format!("{sz}"))
                     .clicked()
                 {
+                    self.tx_cmd.send(GuiCommand::SetFftSize(*sz)).ok();
                     if let Some(frame) = self.last_frame.clone() {
                         let builder = SpectrumBuilder::with_size(*sz);
                         self.last_spectrum = Some(builder.compute(&frame));
@@ -813,6 +1263,7 @@ impl QnmdSolApp {
                 }
             }
             if ui.button(self.text(UiText::Update)).clicked() {
+                self.tx_cmd.send(GuiCommand::SetFftSize(self.fft_size)).ok();
                 if let Some(frame) = self.last_frame.clone() {
                     let builder = SpectrumBuilder::with_size(self.fft_size);
                     self.last_spectrum = Some(builder.compute(&frame));
@@ -1089,7 +1540,11 @@ impl QnmdSolApp {
                             ui.label(marker);
                             ui.label(label);
                         });
-                        ui.label(format!("{:.2} kΩ ({status})", ohms / 1000.0));
+                        ui.label(
+                            self.text(UiText::ImpedanceKohmLine)
+                                .replace("{kohm}", &format!("{:.2}", ohms / 1000.0))
+                                .replace("{status}", &status),
+                        );
                         ui.end_row();
                     }
                 });
@@ -1098,7 +1553,10 @@ impl QnmdSolApp {
             }
             if let Some(first) = values.first() {
                 let ganglion_k = ganglion_display_impedance_kohms((*first as f32) / 1000.0);
-                ui.label(format!("Ganglion 显示(kΩ)：{:.2}", ganglion_k));
+                ui.label(
+                    self.text(UiText::GanglionDisplayLine)
+                        .replace("{kohm}", &format!("{:.2}", ganglion_k)),
+                );
             }
             if let Some(frame) = self.last_frame.as_ref() {
                 if let Some(ch) = frame.samples.get(0) {
@@ -1113,7 +1571,10 @@ impl QnmdSolApp {
                         / ch.len().max(1) as f32;
                     let std = variance.sqrt();
                     let imp = cyton_impedance_from_std(std);
-                    ui.label(format!("Ch1 即时估算(Ω)：{:.0}", imp));
+                    ui.label(
+                        self.text(UiText::Ch1EstimateLine)
+                            .replace("{ohm}", &format!("{:.0}", imp)),
+                    );
                 }
             }
             if let Some(measured_at) = self.resistance_last_measured {
@@ -1311,6 +1772,15 @@ impl eframe::App for QnmdSolApp {
                     BciMessage::ModelPrediction(scores) => {
                         self.model_scores = Some(scores);
                     }
+                    BciMessage::NeuroGptStatus(st) => {
+                        self.neurogpt_status = Some(st);
+                    }
+                    BciMessage::NeuroGptTrigger(idx) => {
+                        self.neurogpt_last_trigger = Some((idx, Instant::now()));
+                    }
+                    BciMessage::NeuroGptCalibrationProgress { progress01 } => {
+                        self.neurogpt_calib_progress01 = progress01;
+                    }
                     _ => continue,
                 }
             } else {
@@ -1332,6 +1802,16 @@ impl eframe::App for QnmdSolApp {
                     }
                     BciMessage::ModelPrediction(scores) => {
                         self.model_scores = Some(scores);
+                    }
+                    BciMessage::NeuroGptStatus(st) => {
+                        self.neurogpt_gate = st.gate;
+                        self.neurogpt_status = Some(st);
+                    }
+                    BciMessage::NeuroGptTrigger(idx) => {
+                        self.neurogpt_last_trigger = Some((idx, Instant::now()));
+                    }
+                    BciMessage::NeuroGptCalibrationProgress { progress01 } => {
+                        self.neurogpt_calib_progress01 = progress01;
                     }
                     BciMessage::RecordingStatus(b) => self.is_recording = b,
                     BciMessage::Spectrum(spec) => {
@@ -1398,26 +1878,31 @@ impl eframe::App for QnmdSolApp {
                             self.last_data_at = Some(Instant::now());
                         }
                     }
-                    BciMessage::CalibrationResult(_, max) => {
+                    BciMessage::CalibrationResult(target, max) => {
                         self.is_calibrating = false;
                         self.clear_progress();
-                        if self.calib_rest_max == 0.0 {
-                            self.calib_rest_max = max;
-                            let msg = match self.language {
-                                Language::English => format!("Base: {:.1}", max),
-                                Language::Chinese => format!("基线：{:.1}", max),
-                            };
-                            self.log(&msg);
-                        } else {
-                            self.calib_act_max = max;
-                            let msg = match self.language {
-                                Language::English => format!("Act: {:.1}", max),
-                                Language::Chinese => format!("动作：{:.1}", max),
-                            };
-                            self.log(&msg);
+                        match target {
+                            CalibrationTarget::Relax => {
+                                self.calib_rest_max = max;
+                                let msg = match self.language {
+                                    Language::English => format!("Base: {:.1}", max),
+                                    Language::Chinese => format!("基线：{:.1}", max),
+                                };
+                                self.log(&msg);
+                            }
+                            CalibrationTarget::Action => {
+                                self.calib_act_max = max;
+                                let msg = match self.language {
+                                    Language::English => format!("Act: {:.1}", max),
+                                    Language::Chinese => format!("动作：{:.1}", max),
+                                };
+                                self.log(&msg);
+                            }
+                        }
+                        if self.calib_rest_max > 0.0 && self.calib_act_max > 0.0 {
                             let new = (self.calib_rest_max + self.calib_act_max) * 0.6;
                             self.trigger_threshold = new;
-                            self.tx_cmd.send(GuiCommand::SetThreshold(new)).unwrap();
+                            self.tx_cmd.send(GuiCommand::SetThreshold(new)).ok();
                             let thresh_msg = match self.language {
                                 Language::English => format!("Threshold: {:.1}", new),
                                 Language::Chinese => format!("阈值：{:.1}", new),
@@ -1602,21 +2087,87 @@ impl eframe::App for QnmdSolApp {
                                 self.log(&msg);
                             }
                         }
+                        if let Some(st) = &self.neurogpt_status {
+                            let status_line = if st.onnx_loaded {
+                                match st.last_infer_ms_ago {
+                                    Some(ms) => self.text(UiText::NeuroGptLoadedLastInfer).replace("{ms}", &ms.to_string()),
+                                    None => self.text(UiText::NeuroGptLoaded).to_owned(),
+                                }
+                            } else if let Some(e) = &st.last_error {
+                                self.text(UiText::NeuroGptDisabledWithErr).replace("{err}", e)
+                            } else {
+                                self.text(UiText::NeuroGptDisabled).to_owned()
+                            };
+                            ui.label(status_line);
+                            if let Some(path) = &st.onnx_path {
+                                ui.label(format!("{}: {path}", self.text(UiText::OnnxPathLabel)));
+                            }
+                        } else {
+                            ui.label(self.text(UiText::NeuroGptStatusUnknown));
+                        }
+                        ui.separator();
+                        ui.label(self.text(UiText::NeuroGptGateTitle));
+                        let mut changed = false;
+                        ui.horizontal(|ui| {
+                            ui.label(self.text(UiText::NeuroGptMinProb));
+                            changed |= ui
+                                .add(egui::Slider::new(&mut self.neurogpt_gate.min_prob, 0.1..=0.99))
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(self.text(UiText::NeuroGptKSigma));
+                            changed |= ui
+                                .add(egui::Slider::new(&mut self.neurogpt_gate.k_sigma, 0.5..=5.0))
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(self.text(UiText::NeuroGptCooldownMs));
+                            let mut v = self.neurogpt_gate.cooldown_ms as f32;
+                            let resp = ui.add(egui::Slider::new(&mut v, 0.0..=1500.0));
+                            if resp.changed() {
+                                self.neurogpt_gate.cooldown_ms = v.round().max(0.0) as u64;
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(self.text(UiText::NeuroGptWarmup));
+                            let mut v = self.neurogpt_gate.warmup as f32;
+                            let resp = ui.add(egui::Slider::new(&mut v, 0.0..=200.0));
+                            if resp.changed() {
+                                self.neurogpt_gate.warmup = v.round().max(0.0) as u32;
+                                changed = true;
+                            }
+                        });
+                        if changed {
+                            self.tx_cmd
+                                .send(GuiCommand::SetNeuroGptGate(self.neurogpt_gate))
+                                .ok();
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button(self.text(UiText::NeuroGptCalibrate10s)).clicked() {
+                                self.tx_cmd
+                                    .send(GuiCommand::NeuroGptCalibrateStart {
+                                        seconds: 10,
+                                        target_triggers_per_min: 4.0,
+                                    })
+                                    .ok();
+                            }
+                            if self.neurogpt_calib_progress01 > 0.0 {
+                                ui.add(
+                                    egui::ProgressBar::new(self.neurogpt_calib_progress01)
+                                        .show_percentage()
+                                        .desired_width(140.0),
+                                );
+                            }
+                        });
+                        if ui.button(self.text(UiText::NeuroGptSelfTest)).clicked() {
+                            self.tx_cmd.send(GuiCommand::NeuroGptSelfTest).ok();
+                        }
                         if let Some(status) = &self.model_status {
                             ui.label(format!(
                                 "{}: {}",
                                 self.text(UiText::ModelLoaded),
                                 status.path
-                            ));
-                            ui.label(format!(
-                                "{}: {}",
-                                self.text(UiText::ModelChannels),
-                                status.info.n_channels
-                            ));
-                            ui.label(format!(
-                                "{}: {}",
-                                self.text(UiText::ModelClasses),
-                                status.info.classes.join(", ")
                             ));
                         } else if let Some(err) = &self.model_error {
                             ui.colored_label(
@@ -1682,24 +2233,67 @@ impl eframe::App for QnmdSolApp {
                                 self.follow_latest = !self.follow_latest;
                             }
                             if self.connection_mode == ConnectionMode::Simulation
-                                && self.is_streaming
                             {
-                                if ui.button(self.text(UiText::InjectArtifact)).clicked() {
-                                    self.tx_cmd.send(GuiCommand::InjectArtifact).ok();
+                                if self.is_streaming {
+                                    if ui.button(self.text(UiText::InjectArtifact)).clicked() {
+                                        self.tx_cmd.send(GuiCommand::InjectArtifact).ok();
+                                    }
+                                    ui.separator();
                                 }
-                                ui.separator();
-                                ui.label("Steam 映射助手 / Steam Mapping Helper");
+                                ui.label(if self.language == Language::Chinese {
+                                    "Steam 映射助手"
+                                } else {
+                                    "Steam Mapping Helper"
+                                });
                                 ui.label(
-                                    egui::RichText::new("AutoCycle 后可切到 Steam 窗口绑定（无需键盘焦点）")
-                                        .small()
-                                        .color(if self.theme_dark {
-                                            Color32::YELLOW
-                                        } else {
-                                            Color32::from_rgb(20, 60, 180)
-                                        }),
+                                    egui::RichText::new(if self.language == Language::Chinese {
+                                        "开启自动循环后可切到 Steam 窗口绑定（无需键盘焦点）"
+                                    } else {
+                                        "After AutoCycle, switch to Steam binding window (no keyboard focus needed)"
+                                    })
+                                    .small()
+                                    .color(if self.theme_dark {
+                                        Color32::YELLOW
+                                    } else {
+                                        Color32::from_rgb(20, 60, 180)
+                                    }),
                                 );
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.checkbox(
+                                        &mut self.mapping_overlay_open,
+                                        if self.language == Language::Chinese {
+                                            "显示悬浮窗"
+                                        } else {
+                                            "Show overlay"
+                                        },
+                                    );
+                                    ui.checkbox(
+                                        &mut self.mapping_overlay_topmost,
+                                        if self.language == Language::Chinese {
+                                            "窗口置顶"
+                                        } else {
+                                            "Always on top"
+                                        },
+                                    );
+                                });
+                                ui.label(format!(
+                                    "vJoy: {}",
+                                    if self.is_vjoy_active {
+                                        "OK"
+                                    } else if self.language == Language::Chinese {
+                                        "未就绪"
+                                    } else {
+                                        "NOT READY"
+                                    }
+                                ));
                                 let auto_label = if self.mapping_helper_auto {
-                                    "Stop AutoCycle"
+                                    if self.language == Language::Chinese {
+                                        "停止自动循环"
+                                    } else {
+                                        "Stop AutoCycle"
+                                    }
+                                } else if self.language == Language::Chinese {
+                                    "开始自动循环"
                                 } else {
                                     "Start AutoCycle"
                                 };
@@ -1741,8 +2335,78 @@ impl eframe::App for QnmdSolApp {
                                             ))
                                             .ok();
                                     }
+                                    if ui.button("LB").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLB,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("RB").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseRB,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("LT").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLT,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("RT").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseRT,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Back").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseBack,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Start").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseStart,
+                                            ))
+                                            .ok();
+                                    }
                                 });
                                 ui.horizontal_wrapped(|ui| {
+                                    if ui.button("Dpad Up").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseDpadUp,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Dpad Down").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseDpadDown,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Dpad Left").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseDpadLeft,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("Dpad Right").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseDpadRight,
+                                            ))
+                                            .ok();
+                                    }
                                     if ui.button("LS Up").clicked() {
                                         self.tx_cmd
                                             .send(GuiCommand::SetMappingHelper(
@@ -1768,6 +2432,48 @@ impl eframe::App for QnmdSolApp {
                                         self.tx_cmd
                                             .send(GuiCommand::SetMappingHelper(
                                                 MappingHelperCommand::PulseLeftStickRight,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("RS Up").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseRightStickUp,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("RS Down").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseRightStickDown,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("RS Left").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseRightStickLeft,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("RS Right").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseRightStickRight,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("LS Click").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseLeftStickClick,
+                                            ))
+                                            .ok();
+                                    }
+                                    if ui.button("RS Click").clicked() {
+                                        self.tx_cmd
+                                            .send(GuiCommand::SetMappingHelper(
+                                                MappingHelperCommand::PulseRightStickClick,
                                             ))
                                             .ok();
                                     }
@@ -1877,16 +2583,48 @@ impl eframe::App for QnmdSolApp {
                 visualizer::draw_xbox_controller(ui, &self.gamepad_visual);
                 ui.separator();
                 ui.label(self.text(UiText::ModelOutput));
-                if let Some(status) = &self.model_status {
-                    let classes = &status.info.classes;
-                    let scores = self
+                if let Some(_status) = &self.model_status {
+                    let class_count = self
                         .model_scores
-                        .clone()
-                        .unwrap_or_else(|| vec![0.0; classes.len()]);
+                        .as_ref()
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    let channel_count = self
+                        .last_frame
+                        .as_ref()
+                        .map(|f| f.channel_labels.len())
+                        .unwrap_or(0);
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}: {}", self.text(UiText::ModelClasses), class_count));
+                        ui.separator();
+                        ui.label(format!("{}: {}", self.text(UiText::ModelChannels), channel_count));
+                    });
+                    if let Some((idx, at)) = self.neurogpt_last_trigger {
+                        if at.elapsed().as_secs_f32() < 2.0 {
+                            let ms = at.elapsed().as_millis().to_string();
+                            let idx_s = idx.to_string();
+                            ui.colored_label(
+                                Color32::from_rgb(60, 200, 120),
+                                self.text(UiText::Triggered)
+                                    .replace("{idx}", &idx_s)
+                                    .replace("{ms}", &ms),
+                            );
+                        }
+                    }
+                    let classes = [
+                        self.text(UiText::ClassLeft),
+                        self.text(UiText::ClassRight),
+                        self.text(UiText::ClassForward),
+                    ];
+                    let scores = self.model_scores.clone().unwrap_or_else(|| vec![0.0; 3]);
                     for (idx, name) in classes.iter().enumerate() {
-                        let v = scores.get(idx).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                        let v = scores
+                            .get(idx)
+                            .copied()
+                            .unwrap_or(0.0f32)
+                            .clamp(0.0f32, 1.0f32);
                         ui.horizontal(|ui| {
-                            ui.label(name);
+                            ui.label(name.to_string());
                             ui.add(
                                 egui::ProgressBar::new(v)
                                     .show_percentage()
@@ -1903,9 +2641,19 @@ impl eframe::App for QnmdSolApp {
                     ui.label(self.text(UiText::ModelNone));
                 }
                 ui.separator();
-                ui.label(self.text(UiText::Logs));
+                ui.horizontal(|ui| {
+                    ui.label(self.text(UiText::Logs));
+                    if ui.button(self.text(UiText::Copy)).clicked() {
+                        ui.output_mut(|o| o.copied_text = self.log_messages.join("\n"));
+                    }
+                    if ui.button(self.text(UiText::Clear)).clicked() {
+                        self.log_messages.clear();
+                    }
+                });
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
+                    .stick_to_bottom(true)
+                    .max_height(220.0)
                     .show(ui, |ui| {
                         for m in &self.log_messages {
                             ui.monospace(m);
@@ -1936,6 +2684,9 @@ impl eframe::App for QnmdSolApp {
                 ViewTab::Impedance => self.show_impedance(ui),
             }
         });
+
+        // Floating overlay for Steam binding (kept above Steam when topmost is enabled).
+        self.show_mapping_overlay(ctx);
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2033,6 +2784,36 @@ impl Language {
             (Language::English, UiText::ModelClasses) => "Classes",
             (Language::English, UiText::ModelChannels) => "Channels",
             (Language::English, UiText::ModelOutput) => "Model Output",
+            (Language::English, UiText::Filters) => "Filters",
+            (Language::English, UiText::Highpass) => "Highpass",
+            (Language::English, UiText::Lowpass) => "Lowpass",
+            (Language::English, UiText::Bandpass) => "Bandpass",
+            (Language::English, UiText::Bandstop) => "Bandstop",
+            (Language::English, UiText::CutoffHz) => "Cutoff Hz",
+            (Language::English, UiText::LowHz) => "Low Hz",
+            (Language::English, UiText::HighHz) => "High Hz",
+            (Language::English, UiText::NeuroGptStatusUnknown) => "NeuroGPT: status unknown (start stream to update)",
+            (Language::English, UiText::NeuroGptLoaded) => "NeuroGPT: loaded",
+            (Language::English, UiText::NeuroGptLoadedLastInfer) => "NeuroGPT: loaded, last infer {ms}ms ago",
+            (Language::English, UiText::NeuroGptDisabled) => "NeuroGPT: disabled",
+            (Language::English, UiText::NeuroGptDisabledWithErr) => "NeuroGPT: disabled ({err})",
+            (Language::English, UiText::OnnxPathLabel) => "ONNX",
+            (Language::English, UiText::NeuroGptGateTitle) => "NeuroGPT adaptive gate",
+            (Language::English, UiText::NeuroGptMinProb) => "min_prob",
+            (Language::English, UiText::NeuroGptKSigma) => "k_sigma",
+            (Language::English, UiText::NeuroGptCooldownMs) => "cooldown_ms",
+            (Language::English, UiText::NeuroGptWarmup) => "warmup",
+            (Language::English, UiText::NeuroGptCalibrate10s) => "NeuroGPT calibrate (10s)",
+            (Language::English, UiText::NeuroGptSelfTest) => "NeuroGPT self-test",
+            (Language::English, UiText::Copy) => "Copy",
+            (Language::English, UiText::Clear) => "Clear",
+            (Language::English, UiText::Triggered) => "Triggered: class={idx} ({ms}ms ago)",
+            (Language::English, UiText::ClassLeft) => "Left",
+            (Language::English, UiText::ClassRight) => "Right",
+            (Language::English, UiText::ClassForward) => "Forward",
+            (Language::English, UiText::ImpedanceKohmLine) => "{kohm} kΩ ({status})",
+            (Language::English, UiText::GanglionDisplayLine) => "Ganglion display (kΩ): {kohm}",
+            (Language::English, UiText::Ch1EstimateLine) => "Ch1 estimate (Ω): {ohm}",
             (Language::Chinese, UiText::Title) => "QNMDsol 演示 v0.1",
             (Language::Chinese, UiText::Subtitle) => "神经接口控制",
             (Language::Chinese, UiText::Sim) => "模拟模式",
@@ -2118,6 +2899,36 @@ impl Language {
             (Language::Chinese, UiText::ModelClasses) => "类别",
             (Language::Chinese, UiText::ModelChannels) => "通道数",
             (Language::Chinese, UiText::ModelOutput) => "模型输出",
+            (Language::Chinese, UiText::Filters) => "滤波",
+            (Language::Chinese, UiText::Highpass) => "高通",
+            (Language::Chinese, UiText::Lowpass) => "低通",
+            (Language::Chinese, UiText::Bandpass) => "带通",
+            (Language::Chinese, UiText::Bandstop) => "带阻",
+            (Language::Chinese, UiText::CutoffHz) => "截止Hz",
+            (Language::Chinese, UiText::LowHz) => "低Hz",
+            (Language::Chinese, UiText::HighHz) => "高Hz",
+            (Language::Chinese, UiText::NeuroGptStatusUnknown) => "NeuroGPT：状态未知（开始采集后更新）",
+            (Language::Chinese, UiText::NeuroGptLoaded) => "NeuroGPT：已加载",
+            (Language::Chinese, UiText::NeuroGptLoadedLastInfer) => "NeuroGPT：已加载，上次推理 {ms}ms 前",
+            (Language::Chinese, UiText::NeuroGptDisabled) => "NeuroGPT：未启用",
+            (Language::Chinese, UiText::NeuroGptDisabledWithErr) => "NeuroGPT：未启用（{err}）",
+            (Language::Chinese, UiText::OnnxPathLabel) => "ONNX",
+            (Language::Chinese, UiText::NeuroGptGateTitle) => "NeuroGPT 触发自适应参数",
+            (Language::Chinese, UiText::NeuroGptMinProb) => "min_prob",
+            (Language::Chinese, UiText::NeuroGptKSigma) => "k_sigma",
+            (Language::Chinese, UiText::NeuroGptCooldownMs) => "cooldown_ms",
+            (Language::Chinese, UiText::NeuroGptWarmup) => "warmup",
+            (Language::Chinese, UiText::NeuroGptCalibrate10s) => "NeuroGPT 校准(10s)",
+            (Language::Chinese, UiText::NeuroGptSelfTest) => "NeuroGPT 自检",
+            (Language::Chinese, UiText::Copy) => "复制",
+            (Language::Chinese, UiText::Clear) => "清空",
+            (Language::Chinese, UiText::Triggered) => "触发：class={idx}（{ms}ms 前）",
+            (Language::Chinese, UiText::ClassLeft) => "左",
+            (Language::Chinese, UiText::ClassRight) => "右",
+            (Language::Chinese, UiText::ClassForward) => "前进",
+            (Language::Chinese, UiText::ImpedanceKohmLine) => "{kohm} kΩ（{status}）",
+            (Language::Chinese, UiText::GanglionDisplayLine) => "Ganglion 显示(kΩ)：{kohm}",
+            (Language::Chinese, UiText::Ch1EstimateLine) => "Ch1 即时估算(Ω)：{ohm}",
         }
     }
     fn default_record_label(&self) -> &'static str {
@@ -2210,6 +3021,36 @@ enum UiText {
     ModelClasses,
     ModelChannels,
     ModelOutput,
+    Filters,
+    Highpass,
+    Lowpass,
+    Bandpass,
+    Bandstop,
+    CutoffHz,
+    LowHz,
+    HighHz,
+    NeuroGptStatusUnknown,
+    NeuroGptLoaded,
+    NeuroGptLoadedLastInfer,
+    NeuroGptDisabled,
+    NeuroGptDisabledWithErr,
+    OnnxPathLabel,
+    NeuroGptGateTitle,
+    NeuroGptMinProb,
+    NeuroGptKSigma,
+    NeuroGptCooldownMs,
+    NeuroGptWarmup,
+    NeuroGptCalibrate10s,
+    NeuroGptSelfTest,
+    Copy,
+    Clear,
+    Triggered,
+    ClassLeft,
+    ClassRight,
+    ClassForward,
+    ImpedanceKohmLine,
+    GanglionDisplayLine,
+    Ch1EstimateLine,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewTab {
