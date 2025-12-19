@@ -247,8 +247,11 @@ impl QnmdSolApp {
         // Use a separate native window so Steam remains visible (draggable overlay).
         let viewport_id = egui::ViewportId::from_hash_of("qnmdsol_binding_helper");
 
-        // Sync from last known global state (main UI will update this; child viewport can also close it).
-        // IMPORTANT: do NOT overwrite checkbox state mid-frame (otherwise the checkbox can't be toggled).
+        // Sync from last known global state (child viewport can close itself; parent must observe that).
+        // Avoids a race where OS close triggers `close_requested` in the child callback but the parent
+        // keeps driving the viewport for extra frames (appearing as a black window).
+        self.mapping_overlay_open = BINDING_OVERLAY_OPEN.load(Ordering::Relaxed) && self.mapping_overlay_open;
+        self.mapping_overlay_topmost = BINDING_OVERLAY_TOPMOST.load(Ordering::Relaxed);
 
         // Only show in Simulation mode; hide otherwise.
         if self.connection_mode != ConnectionMode::Simulation {
@@ -285,13 +288,15 @@ impl QnmdSolApp {
                     egui::WindowLevel::Normal
                 }),
             move |ctx, _class| {
-                if ctx.input(|i| i.viewport().close_requested()) {
+                let closing = ctx.input(|i| i.viewport().close_requested());
+                if closing {
+                    // Ask the viewport to close, but keep drawing one more frame to avoid a black window.
                     BINDING_OVERLAY_OPEN.store(false, Ordering::Relaxed);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    return;
+                } else {
+                    // Mark as open while the window is alive.
+                    BINDING_OVERLAY_OPEN.store(true, Ordering::Relaxed);
                 }
-                // Mark as open while the window is alive.
-                BINDING_OVERLAY_OPEN.store(true, Ordering::Relaxed);
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading(&title);
@@ -302,6 +307,11 @@ impl QnmdSolApp {
                             }
                         });
                     });
+                    if closing {
+                        ui.separator();
+                        ui.label(if lang == Language::Chinese { "正在关闭…" } else { "Closing..." });
+                        return;
+                    }
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {
                         let mut topmost = BINDING_OVERLAY_TOPMOST.load(Ordering::Relaxed);
