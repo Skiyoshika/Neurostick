@@ -17,12 +17,67 @@ use egui::{Color32, ColorImage, TextureHandle, TextureOptions, Vec2};
 use egui_plot::{Line, Plot, PlotBounds, PlotPoints, Text};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::{fs, io::Write, path::PathBuf, time::Instant, time::SystemTime};
 // 引入串口库
 use serialport;
 
 static BINDING_OVERLAY_OPEN: AtomicBool = AtomicBool::new(false);
 static BINDING_OVERLAY_TOPMOST: AtomicBool = AtomicBool::new(false);
+static WAVE_CONTROLS_OPEN: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Debug, PartialEq)]
+struct WaveControlsState {
+    signal_sensitivity: f64,
+    smooth_alpha: f64,
+    wave_window_seconds: f64,
+    wave_auto_scale: bool,
+    wave_fixed_range_uv: f32,
+    wave_notch_50hz: bool,
+    wave_show_stats: bool,
+    wave_highpass: bool,
+    wave_highpass_hz: f32,
+    wave_highpass_q: f32,
+    wave_lowpass: bool,
+    wave_lowpass_hz: f32,
+    wave_lowpass_q: f32,
+    wave_bandpass: bool,
+    wave_bandpass_low_hz: f32,
+    wave_bandpass_high_hz: f32,
+    wave_bandpass_q: f32,
+    wave_bandstop: bool,
+    wave_bandstop_low_hz: f32,
+    wave_bandstop_high_hz: f32,
+    wave_bandstop_q: f32,
+}
+
+impl Default for WaveControlsState {
+    fn default() -> Self {
+        Self {
+            signal_sensitivity: 1.0,
+            smooth_alpha: 0.18,
+            wave_window_seconds: 30.0,
+            wave_auto_scale: false,
+            wave_fixed_range_uv: 200.0,
+            wave_notch_50hz: true,
+            wave_show_stats: true,
+            wave_highpass: true,
+            wave_highpass_hz: 1.0,
+            wave_highpass_q: 0.707,
+            wave_lowpass: true,
+            wave_lowpass_hz: 40.0,
+            wave_lowpass_q: 0.707,
+            wave_bandpass: false,
+            wave_bandpass_low_hz: 1.0,
+            wave_bandpass_high_hz: 40.0,
+            wave_bandpass_q: 0.707,
+            wave_bandstop: false,
+            wave_bandstop_low_hz: 48.0,
+            wave_bandstop_high_hz: 52.0,
+            wave_bandstop_q: 10.0,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct OnnxModelStatus {
@@ -119,6 +174,8 @@ pub struct QnmdSolApp {
     mapping_overlay_open: bool,
     mapping_overlay_topmost: bool,
     status_panel_open: bool,
+    wave_controls_open: bool,
+    wave_controls_state: Arc<Mutex<WaveControlsState>>,
 }
 impl Default for QnmdSolApp {
     fn default() -> Self {
@@ -231,6 +288,8 @@ impl Default for QnmdSolApp {
             mapping_overlay_open: false,
             mapping_overlay_topmost: false,
             status_panel_open: true,
+            wave_controls_open: false,
+            wave_controls_state: Arc::new(Mutex::new(WaveControlsState::default())),
         };
         // Restore overlay window preferences from last run (in-process lifetime).
         app.mapping_overlay_open = BINDING_OVERLAY_OPEN.load(Ordering::Relaxed);
@@ -240,6 +299,200 @@ impl Default for QnmdSolApp {
     }
 }
 impl QnmdSolApp {
+    fn sync_wave_controls_state_from_self(&self) {
+        let Ok(mut st) = self.wave_controls_state.lock() else {
+            return;
+        };
+        *st = WaveControlsState {
+            signal_sensitivity: self.signal_sensitivity,
+            smooth_alpha: self.smooth_alpha,
+            wave_window_seconds: self.wave_window_seconds,
+            wave_auto_scale: self.wave_auto_scale,
+            wave_fixed_range_uv: self.wave_fixed_range_uv,
+            wave_notch_50hz: self.wave_notch_50hz,
+            wave_show_stats: self.wave_show_stats,
+            wave_highpass: self.wave_highpass,
+            wave_highpass_hz: self.wave_highpass_hz,
+            wave_highpass_q: self.wave_highpass_q,
+            wave_lowpass: self.wave_lowpass,
+            wave_lowpass_hz: self.wave_lowpass_hz,
+            wave_lowpass_q: self.wave_lowpass_q,
+            wave_bandpass: self.wave_bandpass,
+            wave_bandpass_low_hz: self.wave_bandpass_low_hz,
+            wave_bandpass_high_hz: self.wave_bandpass_high_hz,
+            wave_bandpass_q: self.wave_bandpass_q,
+            wave_bandstop: self.wave_bandstop,
+            wave_bandstop_low_hz: self.wave_bandstop_low_hz,
+            wave_bandstop_high_hz: self.wave_bandstop_high_hz,
+            wave_bandstop_q: self.wave_bandstop_q,
+        };
+    }
+
+    fn apply_wave_controls_state_if_changed(&mut self) {
+        let Ok(st) = self.wave_controls_state.lock() else {
+            return;
+        };
+        let next = st.clone();
+        drop(st);
+
+        let current = WaveControlsState {
+            signal_sensitivity: self.signal_sensitivity,
+            smooth_alpha: self.smooth_alpha,
+            wave_window_seconds: self.wave_window_seconds,
+            wave_auto_scale: self.wave_auto_scale,
+            wave_fixed_range_uv: self.wave_fixed_range_uv,
+            wave_notch_50hz: self.wave_notch_50hz,
+            wave_show_stats: self.wave_show_stats,
+            wave_highpass: self.wave_highpass,
+            wave_highpass_hz: self.wave_highpass_hz,
+            wave_highpass_q: self.wave_highpass_q,
+            wave_lowpass: self.wave_lowpass,
+            wave_lowpass_hz: self.wave_lowpass_hz,
+            wave_lowpass_q: self.wave_lowpass_q,
+            wave_bandpass: self.wave_bandpass,
+            wave_bandpass_low_hz: self.wave_bandpass_low_hz,
+            wave_bandpass_high_hz: self.wave_bandpass_high_hz,
+            wave_bandpass_q: self.wave_bandpass_q,
+            wave_bandstop: self.wave_bandstop,
+            wave_bandstop_low_hz: self.wave_bandstop_low_hz,
+            wave_bandstop_high_hz: self.wave_bandstop_high_hz,
+            wave_bandstop_q: self.wave_bandstop_q,
+        };
+
+        if current == next {
+            return;
+        }
+
+        self.signal_sensitivity = next.signal_sensitivity;
+        self.smooth_alpha = next.smooth_alpha;
+        self.wave_window_seconds = next.wave_window_seconds;
+        self.view_seconds = next.wave_window_seconds;
+        self.wave_auto_scale = next.wave_auto_scale;
+        self.wave_fixed_range_uv = next.wave_fixed_range_uv;
+        self.wave_notch_50hz = next.wave_notch_50hz;
+        self.wave_show_stats = next.wave_show_stats;
+        self.wave_highpass = next.wave_highpass;
+        self.wave_highpass_hz = next.wave_highpass_hz;
+        self.wave_highpass_q = next.wave_highpass_q;
+        self.wave_lowpass = next.wave_lowpass;
+        self.wave_lowpass_hz = next.wave_lowpass_hz;
+        self.wave_lowpass_q = next.wave_lowpass_q;
+        self.wave_bandpass = next.wave_bandpass;
+        self.wave_bandpass_low_hz = next.wave_bandpass_low_hz;
+        self.wave_bandpass_high_hz = next.wave_bandpass_high_hz;
+        self.wave_bandpass_q = next.wave_bandpass_q;
+        self.wave_bandstop = next.wave_bandstop;
+        self.wave_bandstop_low_hz = next.wave_bandstop_low_hz;
+        self.wave_bandstop_high_hz = next.wave_bandstop_high_hz;
+        self.wave_bandstop_q = next.wave_bandstop_q;
+
+        self.apply_waveform_pipeline_config();
+        if let Some(pipe) = &mut self.waveform_pipeline {
+            pipe.set_time_window(TimeWindow::new(self.wave_window_seconds as f32));
+            self.waveform_view = Some(pipe.view());
+        }
+    }
+
+    fn show_wave_controls_viewport(&mut self, ctx: &egui::Context) {
+        let viewport_id = egui::ViewportId::from_hash_of("qnmdsol_wave_controls");
+
+        // Track current desired open state (set by main UI).
+        WAVE_CONTROLS_OPEN.store(self.wave_controls_open, Ordering::Relaxed);
+        if !self.wave_controls_open {
+            ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
+            return;
+        }
+
+        // Mirror current values so the viewport always starts from current state.
+        self.sync_wave_controls_state_from_self();
+
+        let title: String = if self.language == Language::Chinese {
+            "波形控制".to_owned()
+        } else {
+            "Wave Controls".to_owned()
+        };
+        let lang = self.language;
+        let state = self.wave_controls_state.clone();
+
+        ctx.show_viewport_deferred(
+            viewport_id,
+            egui::ViewportBuilder::default()
+                .with_title(title.clone())
+                .with_inner_size([420.0, 520.0])
+                .with_resizable(true),
+            move |ctx, _class| {
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    WAVE_CONTROLS_OPEN.store(false, Ordering::Relaxed);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+                WAVE_CONTROLS_OPEN.store(true, Ordering::Relaxed);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading(&title);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(if lang == Language::Chinese { "关闭" } else { "Close" }).clicked() {
+                                WAVE_CONTROLS_OPEN.store(false, Ordering::Relaxed);
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        });
+                    });
+                    ui.separator();
+
+                    let Ok(mut st) = state.lock() else { return; };
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            ui.label(if lang == Language::Chinese { "敏感度" } else { "Sensitivity" });
+                            ui.add(egui::Slider::new(&mut st.signal_sensitivity, 0.05..=8.0).logarithmic(true));
+                            ui.separator();
+
+                            ui.label(if lang == Language::Chinese { "平滑度" } else { "Smoothness" });
+                            ui.add(egui::Slider::new(&mut st.smooth_alpha, 0.0..=0.8));
+                            ui.separator();
+
+                            ui.label(if lang == Language::Chinese { "窗口长度(秒)" } else { "Window (sec)" });
+                            ui.add(egui::Slider::new(&mut st.wave_window_seconds, 5.0..=120.0));
+                            ui.separator();
+
+                            ui.checkbox(&mut st.wave_auto_scale, if lang == Language::Chinese { "自动Y轴" } else { "Auto Y" });
+                            ui.add_enabled(
+                                !st.wave_auto_scale,
+                                egui::Slider::new(&mut st.wave_fixed_range_uv, 50.0..=800.0)
+                                    .text(if lang == Language::Chinese { "固定范围(uV)" } else { "Fixed (uV)" }),
+                            );
+                            ui.checkbox(&mut st.wave_notch_50hz, if lang == Language::Chinese { "50Hz 陷波" } else { "50Hz Notch" });
+                            ui.checkbox(&mut st.wave_show_stats, if lang == Language::Chinese { "统计" } else { "Stats" });
+                            ui.separator();
+
+                            ui.collapsing(if lang == Language::Chinese { "滤波" } else { "Filters" }, |ui| {
+                                ui.checkbox(&mut st.wave_highpass, if lang == Language::Chinese { "高通" } else { "Highpass" });
+                                ui.add_enabled(st.wave_highpass, egui::Slider::new(&mut st.wave_highpass_hz, 0.1..=30.0).text(if lang==Language::Chinese{"截止Hz"} else {"Cutoff Hz"}));
+                                ui.add_enabled(st.wave_highpass, egui::Slider::new(&mut st.wave_highpass_q, 0.1..=20.0).text("Q"));
+                                ui.separator();
+
+                                ui.checkbox(&mut st.wave_lowpass, if lang == Language::Chinese { "低通" } else { "Lowpass" });
+                                ui.add_enabled(st.wave_lowpass, egui::Slider::new(&mut st.wave_lowpass_hz, 1.0..=120.0).text(if lang==Language::Chinese{"截止Hz"} else {"Cutoff Hz"}));
+                                ui.add_enabled(st.wave_lowpass, egui::Slider::new(&mut st.wave_lowpass_q, 0.1..=20.0).text("Q"));
+                                ui.separator();
+
+                                ui.checkbox(&mut st.wave_bandpass, if lang == Language::Chinese { "带通" } else { "Bandpass" });
+                                ui.add_enabled(st.wave_bandpass, egui::Slider::new(&mut st.wave_bandpass_low_hz, 0.1..=80.0).text(if lang==Language::Chinese{"低Hz"} else {"Low Hz"}));
+                                ui.add_enabled(st.wave_bandpass, egui::Slider::new(&mut st.wave_bandpass_high_hz, 0.1..=120.0).text(if lang==Language::Chinese{"高Hz"} else {"High Hz"}));
+                                ui.add_enabled(st.wave_bandpass, egui::Slider::new(&mut st.wave_bandpass_q, 0.1..=20.0).text("Q"));
+                                ui.separator();
+
+                                ui.checkbox(&mut st.wave_bandstop, if lang == Language::Chinese { "带阻" } else { "Bandstop" });
+                                ui.add_enabled(st.wave_bandstop, egui::Slider::new(&mut st.wave_bandstop_low_hz, 0.1..=120.0).text(if lang==Language::Chinese{"低Hz"} else {"Low Hz"}));
+                                ui.add_enabled(st.wave_bandstop, egui::Slider::new(&mut st.wave_bandstop_high_hz, 0.1..=120.0).text(if lang==Language::Chinese{"高Hz"} else {"High Hz"}));
+                                ui.add_enabled(st.wave_bandstop, egui::Slider::new(&mut st.wave_bandstop_q, 0.1..=50.0).text("Q"));
+                            });
+                        });
+                });
+            },
+        );
+    }
+
     fn show_mapping_overlay(&mut self, ctx: &egui::Context) {
         // Use a separate native window so Steam remains visible (draggable overlay).
         let viewport_id = egui::ViewportId::from_hash_of("qnmdsol_binding_helper");
@@ -835,6 +1088,25 @@ impl QnmdSolApp {
                 ui.label(self.text(UiText::ConnectFirst));
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button(if self.language == Language::Chinese {
+                    "波形控制窗口…"
+                } else {
+                    "Wave controls window…"
+                })
+                .clicked()
+            {
+                self.wave_controls_open = true;
+                WAVE_CONTROLS_OPEN.store(true, Ordering::Relaxed);
+            }
+            ui.label(format!(
+                "{} {:.1}",
+                self.text(UiText::Threshold),
+                self.trigger_threshold
+            ));
+        });
+        if !self.wave_controls_open {
         // 行1：灵敏度 / 平滑度 + 窗口长度
         ui.horizontal_wrapped(|ui| {
             ui.label(self.text(UiText::Sensitivity));
@@ -1081,6 +1353,7 @@ impl QnmdSolApp {
                 }
             }
         });
+        }
         let available_h = ui.available_height();
         let mut _placeholder: Option<WaveformView> = None;
         let view: &WaveformView = if let Some(v) = self.waveform_view.as_ref() {
@@ -2696,6 +2969,10 @@ impl eframe::App for QnmdSolApp {
 
         // Floating overlay for Steam binding (kept above Steam when topmost is enabled).
         self.show_mapping_overlay(ctx);
+        // Apply changes from detached wave controls viewport (if any).
+        self.wave_controls_open = WAVE_CONTROLS_OPEN.load(Ordering::Relaxed) || self.wave_controls_open;
+        self.apply_wave_controls_state_if_changed();
+        self.show_wave_controls_viewport(ctx);
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
