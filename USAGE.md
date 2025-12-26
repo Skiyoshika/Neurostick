@@ -80,6 +80,16 @@ Note: these keys are read only when the QNMDsol window has focus.
 3. Click **Record Action (3s)** (your intended mental action).
 4. The app computes a demo `Threshold` used for gamepad output.
 
+## 6.2 Feature Reference (panels & knobs)
+- **Connection controls**: CONNECT/START STREAM/STOP. CONNECT opens the serial port (REAL) or keyboard simulator (SIM); START STREAM begins acquisition; STOP cleanly closes streams.
+- **Waveform view**: scrolls raw channel data. The **Reset View** button clears the plotted history if you want a fresh look.
+- **Spectrum view**: shows FFT magnitudes. You can change the FFT window (Hann/Hamming/Blackman) and size for quicker alpha/beta inspection.
+- **Calibration tab**: guided buttons **Record Relax (3s)** / **Record Action (3s)** compute a demo threshold that drives vJoy output. The Threshold slider remains adjustable after recording.
+- **Impedance tab**: estimates each channel’s impedance band and labels them (Good / Acceptable / Poor / Railed) to spot loose/railed electrodes.
+- **AI Data Collection**: enter any label (e.g., `Attack`, `Rest`) and click 🔴 RECORD / ⏹ STOP to write CSV files under the repo root for offline training (`trainer/`).
+- **AI Model UI**: set a `brain_model.json` path, click **LOAD**/**RELOAD**, and view placeholder per-class probabilities in the status bar (runtime inference is not wired yet in `main`).
+- **vJoy output preview**: the left panel mirrors sticks/triggers/buttons so you can confirm that SIM key presses or REAL threshold triggers are reaching the virtual gamepad before opening a game.
+
 ## 7. Steam Input Mapping (XInput translation)
 Many games are XInput-only (Xbox controller). vJoy is DirectInput, so you need Steam Input to translate:
 1. Steam → **Settings** → **Controller** → enable **Generic Gamepad Configuration Support**

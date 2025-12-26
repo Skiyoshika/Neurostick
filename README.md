@@ -11,14 +11,20 @@ QNMDsol is a Rust app that reads EEG data from **OpenBCI Cyton + Daisy (16ch)** 
 - English setup: `USAGE.md`
 - 中文说明: `使用说明.md`
 
-## What This Repo Supports (current `main`)
-- **SIM mode**: keyboard → vJoy (for testing). Keyboard only works when QNMDsol is focused.
-- **REAL mode**: Cyton+Daisy (BrainFlow) → simple threshold demo → vJoy output.
-- **Waveform/Spectrum**: basic real-time visualization.
-- **Calibration tab**: “Record Relax (3s)” + “Record Action (3s)” computes a demo threshold.
-- **Impedance tab**: estimates impedance (rough quality check).
-- **Recording**: saves EEG to CSV for offline training (`trainer/`).
-- **AI Model UI**: can load `brain_model.json` and display placeholder outputs; real-time inference is not wired into `engine` yet.
+## Feature Overview (current `main`)
+- **Mode selector (SIM / REAL)**:
+  - **SIM**: keyboard shortcuts drive the vJoy device. Only works when the QNMDsol window has focus.
+  - **REAL**: OpenBCI Cyton+Daisy (BrainFlow) streams EEG into QNMDsol, which applies a simple threshold demo and drives vJoy.
+- **Connection flow**: CONNECT opens the data source (keyboard simulator or serial port), START STREAM begins data acquisition, STOP stream cleanly closes it.
+- **Waveform view**: real-time plot of the incoming channels with a reset button to clear history.
+- **Spectrum view**: FFT-based magnitude plot with selectable window/size (for quick alpha/beta checks).
+- **Calibration tab**:
+  - Guided buttons **Record Relax (3s)** and **Record Action (3s)** capture two windows and compute a demo threshold.
+  - The resulting Threshold slider can be adjusted manually if the trigger is too sensitive or too hard.
+- **Impedance tab**: estimates per-channel impedance quality and labels them (Good / Acceptable / Poor / Railed) for rapid electrode checks.
+- **AI Data Collection**: enters a free-form label and records CSV EEG samples for offline training (saved under the repo root; see `trainer/`).
+- **AI Model UI**: loads a `brain_model.json` path, reloads on demand, and shows placeholder per-class probabilities in the status bar (inference pipeline is not yet wired into `engine`).
+- **vJoy output preview**: left panel mirrors stick/trigger/button states so you can confirm mappings before opening a game.
 
 ## Requirements (Windows)
 ### Hardware
