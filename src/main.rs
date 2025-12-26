@@ -1,11 +1,11 @@
 // src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod assets;
+mod brain_utils;
 mod drivers;
 mod engine;
 mod gui;
 mod openbci;
-mod brain_utils;
 mod recorder;
 mod types;
 mod visualizer;
@@ -51,7 +51,7 @@ fn main() -> eframe::Result<()> {
         .with_inner_size([1463.0, 915.0])
         .with_min_inner_size([1200.0, 760.0])
         .with_maximized(true)
-        .with_title("QNMDsol demo v0.1");
+        .with_title("Neurostick demo v0.1");
     let viewport = if let Some(icon) = icon_data {
         viewport.with_icon(icon)
     } else {
@@ -62,7 +62,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "QNMDsol",
+        "Neurostick",
         options,
         Box::new(|cc| {
             // 调用字体设置函数，传入 egui 上下文

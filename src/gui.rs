@@ -266,7 +266,7 @@ impl QnmdSolApp {
         let (title, ts_label, mode_label, conn_label, stream_label, rec_label, port_label) =
             match self.language {
                 Language::English => (
-                    "QNMDsol Report",
+                    "Neurostick Report",
                     "Timestamp",
                     "Mode",
                     "Connected",
@@ -275,7 +275,7 @@ impl QnmdSolApp {
                     "Selected Port",
                 ),
                 Language::Chinese => (
-                    "QNMDsol 报告",
+                    "Neurostick 报告",
                     "时间戳",
                     "模式",
                     "已连接",
@@ -1680,13 +1680,17 @@ impl eframe::App for QnmdSolApp {
                                 ui.separator();
                                 ui.label("Steam 映射助手 / Steam Mapping Helper");
                                 ui.label(
-                                    egui::RichText::new("AutoCycle 后可切到 Steam 窗口绑定（无需键盘焦点）")
-                                        .small()
-                                        .color(if self.theme_dark {
+                                    egui::RichText::new(
+                                        "AutoCycle 后可切到 Steam 窗口绑定（无需键盘焦点）",
+                                    )
+                                    .small()
+                                    .color(
+                                        if self.theme_dark {
                                             Color32::YELLOW
                                         } else {
                                             Color32::from_rgb(20, 60, 180)
-                                        }),
+                                        },
+                                    ),
                                 );
                                 let auto_label = if self.mapping_helper_auto {
                                     "Stop AutoCycle"
@@ -1936,7 +1940,7 @@ enum Language {
 impl Language {
     fn text(&self, key: UiText) -> &'static str {
         match (self, key) {
-            (Language::English, UiText::Title) => "QNMDsol demo v0.1",
+            (Language::English, UiText::Title) => "Neurostick demo v0.1",
             (Language::English, UiText::Subtitle) => "Neural Interface Control",
             (Language::English, UiText::Sim) => "Simulation",
             (Language::English, UiText::Real) => "Hardware",
@@ -1955,10 +1959,10 @@ impl Language {
             (Language::English, UiText::Calibration) => "Calibration",
             (Language::English, UiText::FollowOn) => "Follow Latest: ON",
             (Language::English, UiText::FollowOff) => "Follow Latest: OFF",
-            (Language::English, UiText::Ready) => "QNMDsol Demo v0.1 Ready.",
+            (Language::English, UiText::Ready) => "Neurostick Demo v0.1 Ready.",
             (Language::English, UiText::LanguagePrompt) => "Choose your language",
             (Language::English, UiText::StartSubtitle) => "Pick a language to start",
-            (Language::English, UiText::StartHeading) => "Welcome to QNMDsol",
+            (Language::English, UiText::StartHeading) => "Welcome to Neurostick",
             (Language::English, UiText::StartRecording) => "Record",
             (Language::English, UiText::StopRecording) => "Stop",
             (Language::English, UiText::FftSize) => "FFT Size:",
@@ -2023,7 +2027,7 @@ impl Language {
             (Language::English, UiText::ModelClasses) => "Classes",
             (Language::English, UiText::ModelChannels) => "Channels",
             (Language::English, UiText::ModelOutput) => "Model Output",
-            (Language::Chinese, UiText::Title) => "QNMDsol 演示 v0.1",
+            (Language::Chinese, UiText::Title) => "Neurostick 演示 v0.1",
             (Language::Chinese, UiText::Subtitle) => "神经接口控制",
             (Language::Chinese, UiText::Sim) => "模拟模式",
             (Language::Chinese, UiText::Real) => "实机模式",
@@ -2042,10 +2046,10 @@ impl Language {
             (Language::Chinese, UiText::Calibration) => "校准",
             (Language::Chinese, UiText::FollowOn) => "跟随最新：开",
             (Language::Chinese, UiText::FollowOff) => "跟随最新：关",
-            (Language::Chinese, UiText::Ready) => "QNMDsol 演示 v0.1 就绪。",
+            (Language::Chinese, UiText::Ready) => "Neurostick 演示 v0.1 就绪。",
             (Language::Chinese, UiText::LanguagePrompt) => "选择语言",
             (Language::Chinese, UiText::StartSubtitle) => "选择语言开始",
-            (Language::Chinese, UiText::StartHeading) => "欢迎使用 QNMDsol",
+            (Language::Chinese, UiText::StartHeading) => "欢迎使用 Neurostick",
             (Language::Chinese, UiText::StartRecording) => "开始录制",
             (Language::Chinese, UiText::StopRecording) => "停止录制",
             (Language::Chinese, UiText::FftSize) => "FFT 大小:",
