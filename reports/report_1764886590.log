@@ -1,4 +1,4 @@
-QNMDsol Report
+Neurostick Report
 Timestamp: 1764886590
 Mode: Simulation
 Connected: false
@@ -6,6 +6,6 @@ Streaming: false
 Recording: false
 Selected Port: COM3
 Last Logs:
-  > QNMDsol 演示 v0.1 已就绪。
+  > Neurostick 演示 v0.1 已就绪。
   > ⚙️ Engine V13.1 (Synced Logic).
   > 报告已保存: reports\report_1764886586.log

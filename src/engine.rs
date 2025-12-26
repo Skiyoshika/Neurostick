@@ -375,7 +375,7 @@ pub fn spawn_thread(tx: Sender<BciMessage>, rx_cmd: Receiver<GuiCommand>) {
                     // ... (此处省略太长的模拟输入判定，保持原样即可，重点是后面)
                     // 为了演示简单，这里只保留一部分模拟逻辑
                     // Steam mapping helper (works even when Steam window is focused).
-                    // SIM keyboard shortcuts require QNMDsol focus; this helper generates vJoy inputs in the background.
+                    // SIM keyboard shortcuts require Neurostick focus; this helper generates vJoy inputs in the background.
                     let mut sim = current_sim_input;
                     if mapping_helper == MappingHelperCommand::AutoCycle {
                         if mapping_helper_last_step.elapsed() >= Duration::from_millis(650) {

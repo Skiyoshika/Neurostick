@@ -1,18 +1,18 @@
-# QNMDsol
-Quick Neural Mind-Driven Souls-like Controller
+# Neurostick
+Quick Neural Mind-Driven Souls-like Controller (formerly QNMDsol)
 
 ![Rust](https://img.shields.io/badge/Built_with-Rust-orange?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows-blue?style=flat-square)
 ![Hardware](https://img.shields.io/badge/Hardware-OpenBCI-purple?style=flat-square)
 ![License](https://img.shields.io/badge/License-AGPLv3-blue?style=flat-square)
 
-QNMDsol is a Rust app that reads EEG data from **OpenBCI Cyton + Daisy (16ch)** (via BrainFlow) and outputs a **vJoy virtual gamepad** for game control. The UI also provides waveform/spectrum visualization, impedance estimation, and CSV recording.
+Neurostick is a Rust app that reads EEG data from **OpenBCI Cyton + Daisy (16ch)** (via BrainFlow) and outputs a **vJoy virtual gamepad** for game control. The UI also provides waveform/spectrum visualization, impedance estimation, and CSV recording.
 
 - English setup: `USAGE.md`
 - 中文说明: `使用说明.md`
 
 ## What This Repo Supports (current `main`)
-- **SIM mode**: keyboard → vJoy (for testing). Keyboard only works when QNMDsol is focused.
+- **SIM mode**: keyboard → vJoy (for testing). Keyboard only works when Neurostick is focused.
 - **REAL mode**: Cyton+Daisy (BrainFlow) → simple threshold demo → vJoy output.
 - **Waveform/Spectrum**: basic real-time visualization.
 - **Calibration tab**: “Record Relax (3s)” + “Record Action (3s)” computes a demo threshold.
@@ -37,8 +37,8 @@ This repository includes these DLLs in the repo root for Windows x64. If you rem
 
 ## Quick Start
 ```bash
-git clone https://github.com/Skiyoshika/QNMDsol.git
-cd QNMDsol
+git clone https://github.com/Skiyoshika/Neurostick.git
+cd Neurostick
 cargo run
 ```
 
@@ -51,8 +51,8 @@ Most modern games only recognize Xbox controllers (XInput). vJoy is a DirectInpu
 1.  **Preparation:** Launch Steam and ensure Elden Ring is in your Steam library (add it as a non-Steam game if necessary).
 2.  **Generic Support:** Go to Steam -> **Settings** -> **Controller** -> Check **"Enable Generic Gamepad Configuration Support"**.
 3.  **Enable Steam Input:** In the Steam Library, right-click Elden Ring -> **Properties** -> **Controller** -> Select **"Enable Steam Input"**.
-4.  **Button Mapping:** Click **"Controller Layout"**. You must manually map the signals output by QNMDsol (e.g., **Button 1**, **Axis X/Y**) to the corresponding standard **Xbox 360 Buttons** (e.g., A button, Left Stick).
-    * **Tip:** Steam detects the **vJoy device input**, not your keyboard. SIM keyboard shortcuts only work when the QNMDsol window is focused. For mapping, prefer REAL mode (EEG drives vJoy in the background) or use `joy.cpl` to confirm axes/buttons first.
+4.  **Button Mapping:** Click **"Controller Layout"**. You must manually map the signals output by Neurostick (e.g., **Button 1**, **Axis X/Y**) to the corresponding standard **Xbox 360 Buttons** (e.g., A button, Left Stick).
+    * **Tip:** Steam detects the **vJoy device input**, not your keyboard. SIM keyboard shortcuts only work when the Neurostick window is focused. For mapping, prefer REAL mode (EEG drives vJoy in the background) or use `joy.cpl` to confirm axes/buttons first.
 
 After completing these steps, the game will be able to recognize your mind-controlled gamepad.
     

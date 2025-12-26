@@ -59,7 +59,7 @@ def record_session(label, duration=10):
         print(f"❌ 录制失败: {e}")
 
 if __name__ == "__main__":
-    print("=== QNMDsol Python Recorder (Backup) ===")
+    print("=== Neurostick Python Recorder (Backup) ===")
     lbl = input("请输入动作标签 (例如 Relax, Attack): ").strip()
     if lbl:
         sec = input("请输入录制时长 (秒, 默认10): ").strip()

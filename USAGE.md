@@ -1,4 +1,4 @@
-# QNMDsol Setup & Deployment (Windows)
+# Neurostick Setup & Deployment (Windows)
 
 This guide matches the current `main` branch behavior and focuses on a minimal, reproducible setup for:
 - OpenBCI Cyton + Daisy (16ch) via BrainFlow (`BoardController.dll`)
@@ -6,7 +6,7 @@ This guide matches the current `main` branch behavior and focuses on a minimal, 
 - Steam Input mapping (for XInput-only games)
 
 ## 0. What You Get (Current Main)
-- **SIM mode**: keyboard drives the virtual gamepad (for testing). Keyboard shortcuts only work when the QNMDsol window is focused.
+- **SIM mode**: keyboard drives the virtual gamepad (for testing). Keyboard shortcuts only work when the Neurostick window is focused.
 - **REAL mode**: OpenBCI data → simple threshold demo → vJoy output.
 - **Waveform/Spectrum views**: basic real-time visualization.
 - **Calibration tab**: records 2×3s windows and computes a demo threshold.
@@ -33,7 +33,7 @@ This guide matches the current `main` branch behavior and focuses on a minimal, 
    - Select `vJoy Device` → `Properties`
 
 ## 3. Ensure Runtime DLLs (required)
-QNMDsol loads these DLLs at runtime. They must be present in the **working directory**:
+Neurostick loads these DLLs at runtime. They must be present in the **working directory**:
 - When running `cargo run`: the repo root
 - When running a built `.exe`: next to that `.exe`
 
@@ -50,8 +50,8 @@ If you removed them:
 
 ## 4. Build & Run
 ```bash
-git clone https://github.com/Skiyoshika/QNMDsol.git
-cd QNMDsol
+git clone https://github.com/Skiyoshika/Neurostick.git
+cd Neurostick
 cargo run
 ```
 
@@ -64,7 +64,7 @@ cargo run
    - `Space`: A
    - `Z/X/C`: B/X/Y
 
-Note: these keys are read only when the QNMDsol window has focus.
+Note: these keys are read only when the Neurostick window has focus.
 
 ## 6. REAL Mode (hardware)
 1. Close OpenBCI GUI (it may occupy the COM port).
@@ -88,7 +88,7 @@ Many games are XInput-only (Xbox controller). vJoy is DirectInput, so you need S
    - Bind vJoy axes/buttons to Xbox controls
 4. Restart the game if it does not re-detect controllers.
 
-Important: Steam captures **vJoy device input**. It does not capture QNMDsol’s keyboard shortcuts if QNMDsol is not focused.
+Important: Steam captures **vJoy device input**. It does not capture Neurostick’s keyboard shortcuts if Neurostick is not focused.
 
 ## 8. Troubleshooting
 - **`joy.cpl` shows vJoy moving but the game says “no controller”**: enable Steam Input for XInput translation.
